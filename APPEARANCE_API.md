@@ -148,11 +148,16 @@
 - `.paperlib-authors`
 - `.paperlib-year`
 - `.paperlib-title`
+- `.paperlib-item-type-icon`（仅内置标准视图在标题前渲染）
 - `.paperlib-table-rating`
 - `.paperlib-venue`
 - `.paperlib-rankings`
 
 `.paperlib-table` 直接包含表头和 `.paperlib-paper-row`，不存在 `.paperlib-table-body`。
+
+标准视图的 `.paperlib-paper-row` 同时暴露 `data-paper-type` 和
+`data-paper-type-label`，便于按 `journal`、`conference`、`patent`、`thesis`、
+`preprint`、`standard`、`report` 或 `document` 定制类型图标。
 
 ### Detail / 右侧详情
 

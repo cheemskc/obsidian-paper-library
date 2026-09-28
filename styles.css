@@ -5846,7 +5846,80 @@ body.paperlib-is-column-resizing {
 .paperlib-conference-follow-ranks span { padding: 2px 5px; border-radius: 999px; color: var(--interactive-accent); background: color-mix(in srgb, var(--interactive-accent) 9%, transparent); font-size: 8px; }
 .paperlib-conference-follow-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--background-modifier-border); color: var(--text-muted); font-size: 11px; }
 
-/* Standard — quiet, native bento panels. */
+/* Standard library list: compact item-type markers inspired by research tools. */
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-table-header {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 560;
+  letter-spacing: 0;
+  text-transform: none;
+  background: color-mix(in srgb, var(--background-secondary) 42%, var(--background-primary));
+}
+
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-paper-row {
+  min-height: 46px;
+  font-size: 13px;
+}
+
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-paper-row:hover {
+  background: color-mix(in srgb, var(--text-normal) 3%, var(--background-primary)) !important;
+}
+
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-paper-row.is-selected,
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-paper-row.is-selected:hover {
+  background: color-mix(in srgb, var(--interactive-accent) 9%, var(--background-primary)) !important;
+}
+
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-paper-row .paperlib-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 590;
+}
+
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-paper-row.is-selected .paperlib-title {
+  font-weight: 650;
+}
+
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-title-text {
+  min-width: 0;
+  display: block;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-item-type-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+  color: #75808a;
+}
+
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-item-type-icon svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.8;
+}
+
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-item-type-icon.is-conference { color: #c66d4c; }
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-item-type-icon.is-patent { color: #d69700; }
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-item-type-icon.is-thesis { color: #646b75; }
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-item-type-icon.is-journal { color: #6d7883; }
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-item-type-icon.is-preprint { color: #d36b52; }
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-item-type-icon.is-standard { color: #348c5b; }
+.paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-item-type-icon.is-report { color: #bb5f52; }
+
+.theme-dark .paperlib-appearance-standard[data-paperlib-surface="library"] .paperlib-item-type-icon {
+  filter: saturate(.86) brightness(1.2);
+}
+
+/* Standard: quiet, native bento panels. */
 .paperlib-appearance-standard .paperlib-daily-dashboard {
   --daily-panel: var(--background-primary-alt);
   background:

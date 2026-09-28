@@ -58,5 +58,14 @@ assert.equal(plugin.mergePaperMetadata(
   { title, authors: [], year: 2026, venue: "", abstract: "Local abstract", tags: [], doi: "", arxiv: "" },
   { title, authors: [], year: 2026, venue: "OSDI", abstract: "", tags: [], doi: "", arxiv: "" }
 ).abstract, "Local abstract");
+assert.equal(plugin.mergePaperMetadata(
+  { title: "Patent", authors: [], year: 2024, venue: "USPTO", abstract: "", tags: [], publicationType: "" },
+  { title: "Patent", authors: [], year: 2024, venue: "USPTO", abstract: "", tags: [], publicationType: "patent" }
+).publicationType, "patent");
+assert.equal(plugin.getPaperItemType({ publicationType: "patent" }).id, "patent");
+assert.equal(plugin.getPaperItemType({ publicationType: "dissertation" }).id, "thesis");
+assert.equal(plugin.getPaperItemType({ publicationType: "proceedings-article" }).id, "conference");
+assert.equal(plugin.getPaperItemType({ arxiv: "2605.19260", venue: "arXiv" }).id, "preprint");
+assert.equal(plugin.getPaperItemType({ title: "ISO 31000 Risk management", venue: "ISO" }).id, "standard");
 
 console.log("Local PDF metadata tests passed.");

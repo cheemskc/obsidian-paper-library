@@ -286,6 +286,16 @@ const PAPER_TABLE_COLUMN_META = {
   venue: { label: "Venue" },
   rankings: { label: "Rank" }
 };
+const PAPER_ITEM_TYPE_META = {
+  document: { label: "文档", icon: "file-text" },
+  journal: { label: "期刊文章", icon: "file-text" },
+  conference: { label: "会议论文", icon: "presentation" },
+  patent: { label: "专利", icon: "lightbulb" },
+  thesis: { label: "学位论文", icon: "graduation-cap" },
+  preprint: { label: "预印本", icon: "file-pen-line" },
+  standard: { label: "标准", icon: "file-check-2" },
+  report: { label: "报告", icon: "notebook-tabs" }
+};
 const FAVORITE_COLORS = [
   { id: "yellow", label: "黄色", value: "#f4c84b" },
   { id: "red", label: "红色", value: "#ef6b67" },
@@ -981,11 +991,13 @@ const PAPERLIB_ICON_ALIASES = {
   "circle-plus": ["plus-circle", "plus"],
   "database-zap": ["database", "alert-circle"],
   "file-check-2": ["file-check", "check"],
+  "file-pen-line": ["file-pen", "edit-3", "pencil", "file-text"],
   "file-plus-2": ["file-plus", "plus-square", "plus"],
   "file-warning": ["file", "alert-triangle"],
   files: ["copy", "file-text"],
   folders: ["folder", "library"],
   highlighter: ["edit-3", "pencil"],
+  "graduation-cap": ["award", "book-open", "file-text"],
   "image-off": ["image", "file-x"],
   images: ["image", "layout-grid"],
   library: ["book-open", "folder"],
@@ -998,12 +1010,15 @@ const PAPERLIB_ICON_ALIASES = {
   "mouse-pointer-click": ["mouse-pointer"],
   "move-right": ["arrow-right"],
   "notebook-pen": ["edit-3", "pencil", "file-text"],
+  "notebook-tabs": ["notebook", "book-open", "file-text"],
   orbit: ["circle", "move"],
   "paper-composer": ["sparkles", "file-text"],
   palette: ["paintbrush", "edit-3", "settings"],
   "panel-left-open": ["panel-left", "sidebar", "menu"],
   "panels-top-left": ["layout", "grid"],
   "search-x": ["search", "x"],
+  presentation: ["projector", "monitor-up", "file-text"],
+  lightbulb: ["lamp", "sparkles", "file-text"],
   scan: ["focus", "maximize-2"],
   sparkles: ["star", "wand-2"],
   "square-pen": ["edit-3", "pencil"],
@@ -1018,6 +1033,7 @@ const PAPERLIB_ICON_SYMBOLS = {
   "chevron-down": "⌄", "chevron-left": "‹", "chevron-right": "›", "chevron-up": "⌃",
   "circle-alert": "!", "circle-plus": "+", "cloud-off": "☁", copy: "⧉", download: "↓",
   "database-zap": "!", "edit-3": "✎", "external-link": "↗", "file-down": "⇩", "file-plus-2": "+",
+  "file-pen-line": "✎", "graduation-cap": "◆", lightbulb: "◉", "notebook-tabs": "▤", presentation: "▣",
   "file-question": "?", "file-text": "▤", "file-warning": "!", files: "▤", flag: "⚑",
   folder: "▱", "folder-plus": "+", folders: "▱", highlighter: "✎", "image-off": "▧", images: "▧",
   info: "ⓘ", "layout-grid": "▦", "layout-template": "▦", "link-2": "↗",
@@ -1211,6 +1227,39 @@ function isRepositoryVenue(value) {
     || /^corr\b/i.test(venue)
     || /^(?:bio|med|chem)rxiv\b/i.test(venue)
     || /^shenzhen medical academy of research and translation$/i.test(venue);
+}
+
+function resolvePaperItemType(paper = {}) {
+  const values = [paper.itemType, paper.publicationType, paper.documentType, paper.type]
+    .map((value) => String(value || "").trim().toLocaleLowerCase().replace(/[\s_]+/g, "-"))
+    .filter(Boolean);
+  const matches = (pattern) => values.some((value) => pattern.test(value));
+  if (matches(/patent/)) return "patent";
+  if (matches(/thesis|dissertation/)) return "thesis";
+  if (matches(/standard/)) return "standard";
+  if (matches(/report/)) return "report";
+  if (matches(/conference|proceedings/)) return "conference";
+  if (matches(/preprint|posted-content|manuscript/)) return "preprint";
+  if (matches(/journal|article|review/)) return "journal";
+
+  const title = stripMarkup(paper.title || "");
+  const venue = stripMarkup(paper.venue || "");
+  const identifiers = [paper.doi, paper.patentNumber, paper.applicationNumber, paper.standardNumber]
+    .map((value) => String(value || "").trim()).filter(Boolean).join(" ");
+  const context = `${title} ${venue} ${identifiers}`;
+  if (paper.patentNumber || paper.applicationNumber
+    || /\b(?:US|EP|WO|CN|JP|KR)\s?\d{6,}[A-Z]\d?\b/i.test(context)) return "patent";
+  if (paper.thesisType || paper.degree || /\b(?:thesis|dissertation)\b/i.test(context)) return "thesis";
+  if (paper.standardNumber || /\b(?:ISO|IEC|IEEE)\s*(?:STD\s*)?\d{2,}/i.test(context)) return "standard";
+  if (paper.reportNumber || /\b(?:technical|research|working)\s+report\b/i.test(context)) return "report";
+  if (paper.arxiv || (venue && isRepositoryVenue(venue))) return "preprint";
+
+  const venueRule = findVenueRankingRule(venue);
+  if (venueRule?.kind === "conference" || /\b(?:conference|proceedings|symposium|workshop)\b/i.test(venue)) {
+    return "conference";
+  }
+  if (venueRule?.kind === "journal" || venue) return "journal";
+  return "document";
 }
 
 function displayPublicationType(paper, remoteType) {
@@ -3957,6 +4006,7 @@ class PaperLibraryView extends ItemView {
         : "";
       const isChecked = this.checkedPaperIds.has(paper.id);
       const isCurrent = paper.id === this.selectedId && !selectionActive;
+      const paperItemType = this.plugin.getPaperItemType(paper);
       // Chromium sizes <button> flex/grid containers from fixed heights, not
       // intrinsic content, so Paperglass rich rows use a div[role=button]
       // whose flex layout can grow with the three-line content.
@@ -3966,6 +4016,8 @@ class PaperLibraryView extends ItemView {
           "aria-busy": importStatus && importStatus !== "error" ? "true" : "false",
           "aria-pressed": selectionActive ? String(isChecked) : "false",
           "data-paper-id": paper.id,
+          "data-paper-type": paperItemType.id,
+          "data-paper-type-label": paperItemType.label,
           "data-sheet-number": String(paperIndex + 1).padStart(3, "0"),
           title: importStatus ? this.plugin.batchImportStatusLabel(importStatus, paper.importError) : paper.title,
           ...(paperglassRows ? { role: "button", tabindex: "0" } : {})
@@ -4191,7 +4243,18 @@ class PaperLibraryView extends ItemView {
       return;
     }
     if (key === "title") {
-      row.createSpan({ cls: "paperlib-cell paperlib-title", text: paper.title });
+      if (this.plugin.getLibraryAppearanceId() !== "standard") {
+        row.createSpan({ cls: "paperlib-cell paperlib-title", text: paper.title });
+        return;
+      }
+      const title = row.createSpan({ cls: "paperlib-cell paperlib-title" });
+      const itemType = this.plugin.getPaperItemType(paper);
+      const icon = title.createSpan({
+        cls: `paperlib-item-type-icon is-${itemType.id}`,
+        attr: { "aria-label": itemType.label, title: itemType.label }
+      });
+      setPaperlibIcon(icon, itemType.icon);
+      title.createSpan({ cls: "paperlib-title-text", text: paper.title });
       return;
     }
     if (key === "rating") {
@@ -14417,6 +14480,11 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     return this.normalizeVenueRanks(value).map(({ system, rank }) => `${system}:${rank}`).join("; ");
   }
 
+  getPaperItemType(paper = {}) {
+    const id = resolvePaperItemType(paper);
+    return { id, ...(PAPER_ITEM_TYPE_META[id] || PAPER_ITEM_TYPE_META.document) };
+  }
+
   formatVenueDisplay(venue = "") {
     const name = String(venue || "").trim();
     if (!name || name.includes(" · ")) return name;
@@ -20753,7 +20821,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       serpApiCitationCount: Number.isFinite(remote.citationCount)
         ? remote.citationCount
         : (Number.isFinite(local.serpApiCitationCount) ? local.serpApiCitationCount : null),
-      serpApiSourceUrl: remote.sourceUrl || local.serpApiSourceUrl || ""
+      serpApiSourceUrl: remote.sourceUrl || local.serpApiSourceUrl || "",
+      publicationType: remote.publicationType || local.publicationType || ""
     };
   }
 
