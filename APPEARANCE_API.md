@@ -148,7 +148,8 @@
 - `.paperlib-authors`
 - `.paperlib-year`
 - `.paperlib-title`
-- `.paperlib-item-type-icon`（仅内置标准视图在标题前渲染）
+- `.paperlib-type`、`.paperlib-item-type-icon`（内置标准桌面视图的独立类型列）
+- `.paperlib-notes`（内置标准桌面视图的批注数量）
 - `.paperlib-table-rating`
 - `.paperlib-venue`
 - `.paperlib-rankings`
@@ -158,6 +159,8 @@
 标准视图的 `.paperlib-paper-row` 同时暴露 `data-paper-type` 和
 `data-paper-type-label`，便于按 `journal`、`conference`、`patent`、`thesis`、
 `preprint`、`standard`、`report` 或 `document` 定制类型图标。
+标准桌面表格同时暴露 `data-paperlib-table-variant="catalog"`，列顺序固定为
+Type、Title、Contributor、Source、Year、Notes；移动端和其他外观继续使用通用列系统。
 
 ### Detail / 右侧详情
 

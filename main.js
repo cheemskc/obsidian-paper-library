@@ -296,6 +296,23 @@ const PAPER_ITEM_TYPE_META = {
   standard: { label: "标准", icon: "file-check-2" },
   report: { label: "报告", icon: "notebook-tabs" }
 };
+const STANDARD_LIBRARY_COLUMN_ORDER = ["type", "title", "authors", "venue", "year", "notes"];
+const STANDARD_LIBRARY_COLUMN_META = {
+  type: { label: "Type" },
+  title: { label: "Title" },
+  authors: { label: "Contributor" },
+  venue: { label: "Source" },
+  year: { label: "Year" },
+  notes: { label: "Notes" }
+};
+const STANDARD_LIBRARY_COLUMN_WIDTHS = {
+  type: 54,
+  title: 360,
+  authors: 210,
+  venue: 180,
+  year: 72,
+  notes: 64
+};
 const FAVORITE_COLORS = [
   { id: "yellow", label: "黄色", value: "#f4c84b" },
   { id: "red", label: "红色", value: "#ef6b67" },
@@ -983,6 +1000,7 @@ const DEFAULT_SETTINGS = {
 
 const obsidianSetIcon = setIcon;
 const PAPERLIB_ICON_ALIASES = {
+  "arrow-down-up": ["arrow-up-down", "sliders-horizontal"],
   "bar-chart-2": ["bar-chart"],
   "book-open-check": ["book-open", "book"],
   "calendar-days": ["calendar"],
@@ -1028,6 +1046,7 @@ const PAPERLIB_ICON_ALIASES = {
 };
 
 const PAPERLIB_ICON_SYMBOLS = {
+  "arrow-down-up": "↕", list: "≡",
   "bar-chart-2": "▥", "chart-no-axes-column-increasing": "▥",
   "arrow-up": "↑", check: "✓", circle: "○",
   "chevron-down": "⌄", "chevron-left": "‹", "chevron-right": "›", "chevron-up": "⌃",
@@ -2310,6 +2329,8 @@ class PaperLibraryView extends ItemView {
     this.query = "";
     this.sortKey = "addedAt";
     this.sortDirection = "desc";
+    this.itemTypeFilter = "all";
+    this.standardCompact = true;
     this.paperglassRankOnly = false;
     this.collapsedCollections = new Set();
     this.pendingCollectionDraft = null;
@@ -2390,6 +2411,9 @@ class PaperLibraryView extends ItemView {
         ...paper.collections
       ].join(" ").toLocaleLowerCase().includes(q));
     }
+    if (this.itemTypeFilter !== "all" && this.plugin.getLibraryAppearanceId() === "standard") {
+      papers = papers.filter((paper) => this.plugin.getPaperItemType(paper).id === this.itemTypeFilter);
+    }
     if (this.paperglassRankOnly && this.plugin.getLibraryAppearanceBase() === "paperglass") {
       papers = papers.filter((paper) => this.plugin.getPaperVenueRanks(paper)
         .some(({ system, rank }) => system === "CCF" && String(rank).toLocaleUpperCase() === "A"));
@@ -2409,6 +2433,12 @@ class PaperLibraryView extends ItemView {
       } else if (this.sortKey === "attachment") {
         left = a.pdfPath ? "1" : "0";
         right = b.pdfPath ? "1" : "0";
+      } else if (this.sortKey === "type") {
+        left = this.plugin.getPaperItemType(a).label;
+        right = this.plugin.getPaperItemType(b).label;
+      } else if (this.sortKey === "notes") {
+        left = this.getStandardPaperNoteCount(a);
+        right = this.getStandardPaperNoteCount(b);
       }
       const value = String(left).localeCompare(String(right), undefined, { numeric: true });
       return this.sortDirection === "asc" ? value : -value;
@@ -3174,7 +3204,11 @@ class PaperLibraryView extends ItemView {
     });
     const listHead = main.createDiv({ cls: "paperlib-list-head" });
     const heading = listHead.createDiv();
-    heading.createEl("h3", { text: this.getScopeTitle() });
+    const headingLine = heading.createDiv({ cls: "paperlib-heading-line" });
+    headingLine.createEl("h3", { text: this.getScopeTitle() });
+    if (!this.plugin.isMobileApp() && this.plugin.getLibraryAppearanceId() === "standard") {
+      headingLine.createSpan({ cls: "paperlib-standard-count", text: `${this.getFilteredPapers().length} papers` });
+    }
     heading.createSpan({
       cls: "paperlib-subtitle",
       text: this.plugin.isMobileApp()
@@ -3182,9 +3216,64 @@ class PaperLibraryView extends ItemView {
         : "拖入 PDF，即可识别并添加论文"
     });
     if (this.plugin.isMobileApp()) this.renderMobileSort(listHead);
+    else if (this.plugin.getLibraryAppearanceId() === "standard") this.renderStandardListControls(listHead);
 
     this.tableHost = main.createDiv({ cls: "paperlib-table-host" });
     this.renderTable(main);
+  }
+
+  renderStandardListControls(parent) {
+    const actions = parent.createDiv({ cls: "paperlib-list-actions paperlib-standard-list-actions" });
+    const typeControl = actions.createDiv({ cls: "paperlib-standard-select paperlib-standard-type-filter" });
+    setPaperlibIcon(typeControl.createSpan({ cls: "paperlib-standard-control-icon" }), "filter");
+    const typeSelect = typeControl.createEl("select", { attr: { "aria-label": "Filter by item type" } });
+    typeSelect.createEl("option", { value: "all", text: "All types" });
+    Object.entries(PAPER_ITEM_TYPE_META).forEach(([id, meta]) => {
+      typeSelect.createEl("option", { value: id, text: meta.label });
+    });
+    typeSelect.value = this.itemTypeFilter;
+    typeSelect.addEventListener("change", () => {
+      this.itemTypeFilter = typeSelect.value;
+      this.renderTable();
+    });
+
+    const sortControl = actions.createDiv({ cls: "paperlib-standard-select paperlib-standard-sort" });
+    setPaperlibIcon(sortControl.createSpan({ cls: "paperlib-standard-control-icon" }), "arrow-down-up");
+    const sortSelect = sortControl.createEl("select", { attr: { "aria-label": "Sort papers" } });
+    [
+      ["addedAt:desc", "Recently added"],
+      ["title:asc", "Title"],
+      ["authors:asc", "Contributor"],
+      ["venue:asc", "Source"],
+      ["year:desc", "Year"],
+      ["notes:desc", "Notes"],
+      ["type:asc", "Type"]
+    ].forEach(([value, label]) => sortSelect.createEl("option", { value, text: `Sort: ${label}` }));
+    const selectedSort = `${this.sortKey}:${this.sortDirection}`;
+    sortSelect.value = [...sortSelect.options].some((option) => option.value === selectedSort)
+      ? selectedSort
+      : "addedAt:desc";
+    sortSelect.addEventListener("change", () => {
+      [this.sortKey, this.sortDirection] = sortSelect.value.split(":");
+      this.renderTable();
+    });
+
+    const compact = actions.createEl("button", {
+      cls: `paperlib-standard-density ${this.standardCompact ? "is-active" : ""}`,
+      attr: {
+        type: "button",
+        "aria-pressed": String(this.standardCompact),
+        title: this.standardCompact ? "Use comfortable row spacing" : "Use compact row spacing"
+      }
+    });
+    setPaperlibIcon(compact.createSpan(), "list");
+    compact.createSpan({ text: "Compact" });
+    compact.addEventListener("click", () => {
+      this.standardCompact = !this.standardCompact;
+      compact.toggleClass("is-active", this.standardCompact);
+      compact.setAttribute("aria-pressed", String(this.standardCompact));
+      this.renderTable();
+    });
   }
 
   dailyDateKey(value) {
@@ -3973,9 +4062,16 @@ class PaperLibraryView extends ItemView {
     if (selectionActive) this.renderBatchBar(this.tableHost, papers);
     const table = this.tableHost.createDiv({ cls: "paperlib-table" });
     table.toggleClass("is-selection-mode", selectionActive);
-    const columnWidths = this.getTableColumnWidths();
-    const columnOrder = this.getTableColumnOrder();
-    this.applyTableColumnWidths(table, columnWidths, columnOrder);
+    const standardCatalog = this.plugin.getLibraryAppearanceId() === "standard" && !this.plugin.isMobileApp();
+    const columnOrder = standardCatalog ? STANDARD_LIBRARY_COLUMN_ORDER : this.getTableColumnOrder();
+    if (standardCatalog) {
+      table.setAttribute("data-paperlib-table-variant", "catalog");
+      table.toggleClass("is-standard-compact", this.standardCompact);
+      this.applyStandardTableColumnWidths(table);
+    } else {
+      const columnWidths = this.getTableColumnWidths();
+      this.applyTableColumnWidths(table, columnWidths, columnOrder);
+    }
     const paperglassRows = this.plugin.getLibraryAppearanceBase() === "paperglass" && !this.plugin.isMobileApp();
     if (paperglassRows) {
       const header = table.createDiv({ cls: "paperlib-paperglass-table-header" });
@@ -3983,8 +4079,13 @@ class PaperLibraryView extends ItemView {
     } else {
       const header = table.createDiv({ cls: "paperlib-row paperlib-table-header" });
       columnOrder.forEach((key) => {
-        const meta = PAPER_TABLE_COLUMN_META[key] || { label: key };
-        this.createSortHeader(header, key, meta.label, table, meta.icon || "");
+        if (standardCatalog) {
+          const meta = STANDARD_LIBRARY_COLUMN_META[key] || { label: key };
+          this.createStandardSortHeader(header, key, meta.label);
+        } else {
+          const meta = PAPER_TABLE_COLUMN_META[key] || { label: key };
+          this.createSortHeader(header, key, meta.label, table, meta.icon || "");
+        }
       });
     }
 
@@ -4031,6 +4132,7 @@ class PaperLibraryView extends ItemView {
         });
       }
       if (paperglassRows) this.renderPaperglassRowCells(row, paper, paperIndex);
+      else if (standardCatalog) columnOrder.forEach((key) => this.renderStandardPaperTableCell(row, key, paper));
       else columnOrder.forEach((key) => this.renderPaperTableCell(row, key, paper));
       row.addEventListener("click", (event) => {
         if (event.metaKey || event.ctrlKey) {
@@ -4145,7 +4247,73 @@ class PaperLibraryView extends ItemView {
         ? `已选 ${this.checkedPaperIds.size} 篇`
         : (this.selectedId ? "1 selected" : "0 selected")
     });
+    this.containerEl.querySelector(".paperlib-standard-count")?.setText(`${papers.length} papers`);
     this.restoreTableScroll(table);
+  }
+
+  applyStandardTableColumnWidths(table) {
+    const widths = { ...STANDARD_LIBRARY_COLUMN_WIDTHS };
+    const available = Math.max(0, Number(this.tableHost?.clientWidth) || 0);
+    const baseTotal = STANDARD_LIBRARY_COLUMN_ORDER.reduce((sum, key) => sum + widths[key], 0);
+    if (available > baseTotal) widths.title += available - baseTotal;
+    STANDARD_LIBRARY_COLUMN_ORDER.forEach((key) => {
+      table.style.setProperty(`--paperlib-column-${key}`, `${widths[key]}px`);
+    });
+    table.style.setProperty(
+      "--paperlib-table-columns",
+      STANDARD_LIBRARY_COLUMN_ORDER.map((key) => `var(--paperlib-column-${key})`).join(" ")
+    );
+    table.style.setProperty(
+      "--paperlib-table-width",
+      `${STANDARD_LIBRARY_COLUMN_ORDER.reduce((sum, key) => sum + widths[key], 0)}px`
+    );
+  }
+
+  getStandardPaperNoteCount(paper) {
+    const records = this.plugin.getPaperPdfMarkRecords?.(paper) || [];
+    const ids = new Set();
+    records.forEach((record, index) => ids.add(String(record?.id || record?.pdfAnnotationId || `record-${index}`)));
+    return ids.size;
+  }
+
+  renderStandardPaperTableCell(row, key, paper) {
+    if (key === "type") {
+      const itemType = this.plugin.getPaperItemType(paper);
+      const cell = row.createSpan({
+        cls: `paperlib-cell paperlib-type paperlib-item-type-icon is-${itemType.id}`,
+        attr: { "aria-label": itemType.label, title: itemType.label }
+      });
+      setPaperlibIcon(cell, itemType.icon);
+      return;
+    }
+    if (key === "title") {
+      const title = row.createSpan({ cls: "paperlib-cell paperlib-title" });
+      title.createSpan({ cls: "paperlib-title-text", text: paper.title });
+      if (paper.pdfPath) {
+        const attachment = title.createSpan({
+          cls: "paperlib-standard-attachment",
+          attr: { "aria-label": "PDF attached", title: "PDF attached" }
+        });
+        setPaperlibIcon(attachment, "paperclip");
+      }
+      return;
+    }
+    if (key === "authors") {
+      row.createSpan({ cls: "paperlib-cell paperlib-authors", text: truncate((paper.authors || []).join(", "), 56) || "Unknown" });
+      return;
+    }
+    if (key === "venue") {
+      row.createSpan({ cls: "paperlib-cell paperlib-venue", text: this.plugin.formatVenueDisplay(paper.venue) || "Unpublished" });
+      return;
+    }
+    if (key === "year") {
+      row.createSpan({ cls: "paperlib-cell paperlib-year", text: String(paper.year || "-") });
+      return;
+    }
+    if (key === "notes") {
+      const count = this.getStandardPaperNoteCount(paper);
+      row.createSpan({ cls: `paperlib-cell paperlib-notes ${count ? "has-notes" : ""}`, text: String(count) });
+    }
   }
 
   captureTableScroll() {
@@ -4667,6 +4835,28 @@ class PaperLibraryView extends ItemView {
         this.sortDirection = "asc";
       }
       this.render();
+    });
+  }
+
+  createStandardSortHeader(parent, key, label) {
+    const button = parent.createEl("button", {
+      cls: `paperlib-cell paperlib-sort paperlib-${key}`,
+      attr: { "aria-label": `Sort by ${label}`, title: `Sort by ${label}` }
+    });
+    button.createSpan({ text: label });
+    if (this.sortKey === key) {
+      setPaperlibIcon(button.createSpan({ cls: "paperlib-standard-sort-direction" }),
+        this.sortDirection === "asc" ? "chevron-up" : "chevron-down");
+    }
+    button.addEventListener("click", () => {
+      if (this.sortKey === key) this.sortDirection = this.sortDirection === "asc" ? "desc" : "asc";
+      else {
+        this.sortKey = key;
+        this.sortDirection = ["year", "notes"].includes(key) ? "desc" : "asc";
+      }
+      this.renderTable();
+      const select = this.containerEl.querySelector(".paperlib-standard-sort select");
+      if (select) select.value = `${this.sortKey}:${this.sortDirection}`;
     });
   }
 
