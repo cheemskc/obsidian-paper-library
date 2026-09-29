@@ -296,22 +296,25 @@ const PAPER_ITEM_TYPE_META = {
   standard: { label: "标准", icon: "file-check-2" },
   report: { label: "报告", icon: "notebook-tabs" }
 };
-const STANDARD_LIBRARY_COLUMN_ORDER = ["type", "title", "authors", "venue", "year", "notes"];
+const STANDARD_LIBRARY_COLUMN_ORDER = [
+  "type", "title", "authors", "institution", "venue", "year", "rating",
+  "rankings", "notes", "tags", "doi", "attachment", "favorite"
+];
+const DEFAULT_STANDARD_LIBRARY_COLUMNS = ["type", "title", "authors", "venue", "year", "notes"];
 const STANDARD_LIBRARY_COLUMN_META = {
-  type: { label: "Type" },
-  title: { label: "Title" },
-  authors: { label: "Contributor" },
-  venue: { label: "Source" },
-  year: { label: "Year" },
-  notes: { label: "Notes" }
-};
-const STANDARD_LIBRARY_COLUMN_WIDTHS = {
-  type: 54,
-  title: 360,
-  authors: 210,
-  venue: 180,
-  year: 72,
-  notes: 64
+  type: { label: "Type", menuLabel: "类型", width: 54 },
+  title: { label: "Title", menuLabel: "标题", width: 360, required: true },
+  authors: { label: "Contributor", menuLabel: "作者", width: 210 },
+  institution: { label: "Institution", menuLabel: "机构", width: 190 },
+  venue: { label: "Source", menuLabel: "来源", width: 180 },
+  year: { label: "Year", menuLabel: "年份", width: 72 },
+  rating: { label: "Rating", menuLabel: "评分", width: 104 },
+  rankings: { label: "Rank", menuLabel: "分区 / 等级", width: 220 },
+  notes: { label: "Notes", menuLabel: "笔记", width: 64 },
+  tags: { label: "Tags", menuLabel: "标签", width: 180 },
+  doi: { label: "DOI", menuLabel: "DOI", width: 190 },
+  attachment: { label: "File", menuLabel: "附件", width: 52 },
+  favorite: { label: "Star", menuLabel: "收藏", width: 52 }
 };
 const FAVORITE_COLORS = [
   { id: "yellow", label: "黄色", value: "#f4c84b" },
@@ -961,6 +964,7 @@ const DEFAULT_SETTINGS = {
   defaultHighlightColor: "Yellow",
   tableColumnWidths: Object.fromEntries(Object.entries(PAPER_TABLE_COLUMNS).map(([key, value]) => [key, value.width])),
   tableColumnOrder: [...DEFAULT_PAPER_TABLE_COLUMN_ORDER],
+  standardTableColumns: [...DEFAULT_STANDARD_LIBRARY_COLUMNS],
   jcrRankCache: {},
   jcrRankCacheVersion: "showjcr-jcr2025-if",
   conferenceRateCache: {},
@@ -2330,7 +2334,6 @@ class PaperLibraryView extends ItemView {
     this.sortKey = "addedAt";
     this.sortDirection = "desc";
     this.itemTypeFilter = "all";
-    this.standardCompact = true;
     this.paperglassRankOnly = false;
     this.collapsedCollections = new Set();
     this.pendingCollectionDraft = null;
@@ -2404,6 +2407,7 @@ class PaperLibraryView extends ItemView {
       papers = papers.filter((paper) => [
         paper.title,
         paper.venue,
+        this.getPaperInstitution(paper),
         paper.abstract,
         this.plugin.formatVenueRanksInput(this.plugin.getPaperVenueRanks(paper)),
         ...paper.authors,
@@ -2439,6 +2443,9 @@ class PaperLibraryView extends ItemView {
       } else if (this.sortKey === "notes") {
         left = this.getStandardPaperNoteCount(a);
         right = this.getStandardPaperNoteCount(b);
+      } else if (this.sortKey === "institution") {
+        left = this.getPaperInstitution(a);
+        right = this.getPaperInstitution(b);
       }
       const value = String(left).localeCompare(String(right), undefined, { numeric: true });
       return this.sortDirection === "asc" ? value : -value;
@@ -3185,6 +3192,23 @@ class PaperLibraryView extends ItemView {
       "paperlib-select-toggle");
     selectToggle.toggleClass("is-active", this.selectionActive);
     if (this.plugin.isMobileApp()) this.renderMobileToolbarActions(toolbar);
+    else {
+      const detailToggle = iconButton(
+        toolbar,
+        "info",
+        "打开论文详情",
+        () => this.plugin.ensureDetailView(true),
+        "paperlib-detail-toggle"
+      );
+      detailToggle.disabled = !this.selectedId;
+      iconButton(
+        toolbar,
+        PAPER_COMPOSER_ICON,
+        "打开 Paper Composer（AI）",
+        () => this.plugin.openSmartComposer(),
+        "paperlib-composer-toggle"
+      );
+    }
     const severanceMasthead = main.createDiv({ cls: "paperlib-severance-masthead" });
     const severanceMark = severanceMasthead.createDiv({ cls: "paperlib-severance-mark", attr: { "aria-hidden": "true" } });
     severanceMark.createSpan({ text: appearance.mastheadMark });
@@ -3244,8 +3268,11 @@ class PaperLibraryView extends ItemView {
       ["addedAt:desc", "Recently added"],
       ["title:asc", "Title"],
       ["authors:asc", "Contributor"],
+      ["institution:asc", "Institution"],
       ["venue:asc", "Source"],
       ["year:desc", "Year"],
+      ["rating:desc", "Rating"],
+      ["rankings:asc", "Rank"],
       ["notes:desc", "Notes"],
       ["type:asc", "Type"]
     ].forEach(([value, label]) => sortSelect.createEl("option", { value, text: `Sort: ${label}` }));
@@ -3255,23 +3282,6 @@ class PaperLibraryView extends ItemView {
       : "addedAt:desc";
     sortSelect.addEventListener("change", () => {
       [this.sortKey, this.sortDirection] = sortSelect.value.split(":");
-      this.renderTable();
-    });
-
-    const compact = actions.createEl("button", {
-      cls: `paperlib-standard-density ${this.standardCompact ? "is-active" : ""}`,
-      attr: {
-        type: "button",
-        "aria-pressed": String(this.standardCompact),
-        title: this.standardCompact ? "Use comfortable row spacing" : "Use compact row spacing"
-      }
-    });
-    setPaperlibIcon(compact.createSpan(), "list");
-    compact.createSpan({ text: "Compact" });
-    compact.addEventListener("click", () => {
-      this.standardCompact = !this.standardCompact;
-      compact.toggleClass("is-active", this.standardCompact);
-      compact.setAttribute("aria-pressed", String(this.standardCompact));
       this.renderTable();
     });
   }
@@ -4063,11 +4073,10 @@ class PaperLibraryView extends ItemView {
     const table = this.tableHost.createDiv({ cls: "paperlib-table" });
     table.toggleClass("is-selection-mode", selectionActive);
     const standardCatalog = this.plugin.getLibraryAppearanceId() === "standard" && !this.plugin.isMobileApp();
-    const columnOrder = standardCatalog ? STANDARD_LIBRARY_COLUMN_ORDER : this.getTableColumnOrder();
+    const columnOrder = standardCatalog ? this.getStandardTableColumnOrder() : this.getTableColumnOrder();
     if (standardCatalog) {
       table.setAttribute("data-paperlib-table-variant", "catalog");
-      table.toggleClass("is-standard-compact", this.standardCompact);
-      this.applyStandardTableColumnWidths(table);
+      this.applyStandardTableColumnWidths(table, columnOrder);
     } else {
       const columnWidths = this.getTableColumnWidths();
       this.applyTableColumnWidths(table, columnWidths, columnOrder);
@@ -4251,21 +4260,25 @@ class PaperLibraryView extends ItemView {
     this.restoreTableScroll(table);
   }
 
-  applyStandardTableColumnWidths(table) {
-    const widths = { ...STANDARD_LIBRARY_COLUMN_WIDTHS };
+  getStandardTableColumnOrder() {
+    return this.plugin.normalizeStandardTableColumns(this.plugin.settings.standardTableColumns);
+  }
+
+  applyStandardTableColumnWidths(table, columnOrder) {
+    const widths = Object.fromEntries(columnOrder.map((key) => [key, STANDARD_LIBRARY_COLUMN_META[key]?.width || 120]));
     const available = Math.max(0, Number(this.tableHost?.clientWidth) || 0);
-    const baseTotal = STANDARD_LIBRARY_COLUMN_ORDER.reduce((sum, key) => sum + widths[key], 0);
+    const baseTotal = columnOrder.reduce((sum, key) => sum + widths[key], 0);
     if (available > baseTotal) widths.title += available - baseTotal;
-    STANDARD_LIBRARY_COLUMN_ORDER.forEach((key) => {
+    columnOrder.forEach((key) => {
       table.style.setProperty(`--paperlib-column-${key}`, `${widths[key]}px`);
     });
     table.style.setProperty(
       "--paperlib-table-columns",
-      STANDARD_LIBRARY_COLUMN_ORDER.map((key) => `var(--paperlib-column-${key})`).join(" ")
+      columnOrder.map((key) => `var(--paperlib-column-${key})`).join(" ")
     );
     table.style.setProperty(
       "--paperlib-table-width",
-      `${STANDARD_LIBRARY_COLUMN_ORDER.reduce((sum, key) => sum + widths[key], 0)}px`
+      `${columnOrder.reduce((sum, key) => sum + widths[key], 0)}px`
     );
   }
 
@@ -4276,14 +4289,30 @@ class PaperLibraryView extends ItemView {
     return ids.size;
   }
 
+  getPaperInstitution(paper) {
+    const values = [
+      paper.institution,
+      paper.affiliation,
+      paper.publisher,
+      paper.assignee,
+      ...(Array.isArray(paper.institutions) ? paper.institutions : []),
+      ...(Array.isArray(paper.affiliations) ? paper.affiliations : [])
+    ].flatMap((value) => Array.isArray(value) ? value : [value])
+      .map((value) => typeof value === "object" ? (value?.name || value?.label || "") : value)
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    return [...new Set(values)].join("; ");
+  }
+
   renderStandardPaperTableCell(row, key, paper) {
     if (key === "type") {
       const itemType = this.plugin.getPaperItemType(paper);
       const cell = row.createSpan({
-        cls: `paperlib-cell paperlib-type paperlib-item-type-icon is-${itemType.id}`,
+        cls: "paperlib-cell paperlib-type",
         attr: { "aria-label": itemType.label, title: itemType.label }
       });
-      setPaperlibIcon(cell, itemType.icon);
+      const icon = cell.createSpan({ cls: `paperlib-item-type-icon is-${itemType.id}` });
+      setPaperlibIcon(icon, itemType.icon);
       return;
     }
     if (key === "title") {
@@ -4302,6 +4331,13 @@ class PaperLibraryView extends ItemView {
       row.createSpan({ cls: "paperlib-cell paperlib-authors", text: truncate((paper.authors || []).join(", "), 56) || "Unknown" });
       return;
     }
+    if (key === "institution") {
+      row.createSpan({
+        cls: "paperlib-cell paperlib-institution",
+        text: truncate(this.getPaperInstitution(paper), 48) || "—"
+      });
+      return;
+    }
     if (key === "venue") {
       row.createSpan({ cls: "paperlib-cell paperlib-venue", text: this.plugin.formatVenueDisplay(paper.venue) || "Unpublished" });
       return;
@@ -4313,6 +4349,18 @@ class PaperLibraryView extends ItemView {
     if (key === "notes") {
       const count = this.getStandardPaperNoteCount(paper);
       row.createSpan({ cls: `paperlib-cell paperlib-notes ${count ? "has-notes" : ""}`, text: String(count) });
+      return;
+    }
+    if (key === "tags") {
+      row.createSpan({ cls: "paperlib-cell paperlib-tags", text: truncate((paper.tags || []).join(", "), 48) || "—" });
+      return;
+    }
+    if (key === "doi") {
+      row.createSpan({ cls: "paperlib-cell paperlib-doi", text: paper.doi || "—" });
+      return;
+    }
+    if (["rating", "rankings", "attachment", "favorite"].includes(key)) {
+      this.renderPaperTableCell(row, key, paper);
     }
   }
 
@@ -4346,6 +4394,8 @@ class PaperLibraryView extends ItemView {
     this.tableHost?.querySelectorAll?.(".paperlib-paper-row[data-paper-id]").forEach((row) => {
       row.toggleClass("is-selected", !this.selectionActive && row.dataset.paperId === this.selectedId);
     });
+    const detailToggle = this.containerEl.querySelector?.(".paperlib-detail-toggle");
+    if (detailToggle) detailToggle.disabled = !this.selectedId;
   }
 
   scheduleSelectedPaperDetailRefresh() {
@@ -4841,7 +4891,10 @@ class PaperLibraryView extends ItemView {
   createStandardSortHeader(parent, key, label) {
     const button = parent.createEl("button", {
       cls: `paperlib-cell paperlib-sort paperlib-${key}`,
-      attr: { "aria-label": `Sort by ${label}`, title: `Sort by ${label}` }
+      attr: {
+        "aria-label": `Sort by ${label}; right-click to choose columns`,
+        title: `Sort by ${label} · Right-click to choose columns`
+      }
     });
     button.createSpan({ text: label });
     if (this.sortKey === key) {
@@ -4858,6 +4911,46 @@ class PaperLibraryView extends ItemView {
       const select = this.containerEl.querySelector(".paperlib-standard-sort select");
       if (select) select.value = `${this.sortKey}:${this.sortDirection}`;
     });
+    button.addEventListener("contextmenu", (event) => this.showStandardColumnMenu(event));
+  }
+
+  showStandardColumnMenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const activeColumns = this.getStandardTableColumnOrder();
+    const activeSet = new Set(activeColumns);
+    const menu = new Menu();
+    menu.addItem((item) => item
+      .setTitle("显示字段（标题固定）")
+      .setIcon("columns-3")
+      .setDisabled(true));
+    STANDARD_LIBRARY_COLUMN_ORDER.forEach((key) => {
+      const meta = STANDARD_LIBRARY_COLUMN_META[key];
+      const active = activeSet.has(key);
+      menu.addItem((item) => {
+        item.setTitle(meta.menuLabel || meta.label).setChecked(active);
+        if (meta.required) item.setDisabled(true);
+        else item.onClick(async () => {
+          const nextSet = new Set(activeColumns);
+          if (active) nextSet.delete(key);
+          else nextSet.add(key);
+          this.plugin.settings.standardTableColumns = STANDARD_LIBRARY_COLUMN_ORDER
+            .filter((columnKey) => nextSet.has(columnKey));
+          await this.plugin.saveSettings();
+          this.renderTable();
+        });
+      });
+    });
+    menu.addSeparator();
+    menu.addItem((item) => item
+      .setTitle("恢复默认字段")
+      .setIcon("rotate-ccw")
+      .onClick(async () => {
+        this.plugin.settings.standardTableColumns = [...DEFAULT_STANDARD_LIBRARY_COLUMNS];
+        await this.plugin.saveSettings();
+        this.renderTable();
+      }));
+    menu.showAtMouseEvent(event);
   }
 
   renderVenueRankPills(parent, paper) {
@@ -13661,6 +13754,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     ]);
     this.settings.tableColumnWidths = this.normalizePaperTableColumnWidths(stored?.tableColumnWidths);
     this.settings.tableColumnOrder = this.normalizePaperTableColumnOrder(stored?.tableColumnOrder);
+    this.settings.standardTableColumns = this.normalizeStandardTableColumns(stored?.standardTableColumns);
     this.settings.jcrRankCache = stored?.jcrRankCacheVersion === DEFAULT_SETTINGS.jcrRankCacheVersion
       && stored?.jcrRankCache && typeof stored.jcrRankCache === "object" ? stored.jcrRankCache : {};
     this.settings.jcrRankCacheVersion = DEFAULT_SETTINGS.jcrRankCacheVersion;
@@ -14035,6 +14129,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     ]);
     normalized.tableColumnWidths = this.normalizePaperTableColumnWidths(normalized.tableColumnWidths);
     normalized.tableColumnOrder = this.normalizePaperTableColumnOrder(normalized.tableColumnOrder);
+    normalized.standardTableColumns = this.normalizeStandardTableColumns(normalized.standardTableColumns);
     return normalized;
   }
 
@@ -14633,6 +14728,15 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       if (!normalized.includes(key)) normalized.push(key);
     });
     return normalized;
+  }
+
+  normalizeStandardTableColumns(columns) {
+    const source = Array.isArray(columns) ? columns : DEFAULT_STANDARD_LIBRARY_COLUMNS;
+    const selected = new Set(source
+      .map((key) => String(key || ""))
+      .filter((key) => STANDARD_LIBRARY_COLUMN_ORDER.includes(key)));
+    selected.add("title");
+    return STANDARD_LIBRARY_COLUMN_ORDER.filter((key) => selected.has(key));
   }
 
   normalizeVenueRanks(value = []) {
