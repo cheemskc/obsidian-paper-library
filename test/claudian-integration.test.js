@@ -117,7 +117,7 @@ assert.ok(main.includes("reconcileComposerLinkedPdfState"), "restored and remove
 assert.ok(main.includes("!pending.includes(item) || item.workspaceLinked"), "workspace-linked PDF context must remain available after each turn");
 assert.ok(main.includes("visibleAttachments = state.attachments.filter((attachment) => !attachment.workspaceLinked)"), "native PDF Linked content must be the only visible input card");
 assert.ok(main.includes('status.className = "paperlib-linked-pdf-status"'), "linked PDF parsing must render detailed progress inside the native card");
-assert.ok(main.includes('`${progress.stage || "本地解析"} · ${percent}%${eta}`'), "linked PDF progress must show its stage, percentage, and ETA");
+assert.ok(main.includes('statusText = `${progress.stage || (currentMode === "mineru" ? "MinerU 解析" : "本地解析")} · ${percent}%${eta}`'), "linked PDF progress must show its mode-aware stage, percentage, and ETA");
 assert.ok(main.includes("${processedPages}/${totalPages} 页 · ${characterCount} 字符"), "completed linked PDF parsing must retain concrete page and character counts");
 assert.ok(main.includes("clearComposerWorkspaceLinkedPdf"), "switching linked files must remove the previous automatic document card");
 assert.ok(main.includes("tab.ui?.linkedContentController"), "Paper Composer must update only its own linked-content controller");

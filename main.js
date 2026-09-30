@@ -28,6 +28,7 @@ const {
   Platform,
   Plugin,
   PluginSettingTab,
+  SecretComponent,
   Setting,
   addIcon,
   requireApiVersion,
@@ -945,6 +946,71 @@ const PAPER_COMPOSER_MODEL_OPTIONS_VERSION = 7;
 const PAPER_COMPOSER_CHATGPT_FALLBACK_MODEL = "gpt-5.4";
 const PAPER_COMPOSER_CHATGPT_BUNDLED_CODEX_PATH = "/Applications/ChatGPT.app/Contents/Resources/codex";
 const PAPER_COMPOSER_CLI_PROVIDERS = new Set(["kimi"]);
+const MINERU_CACHE_VERSION = 1;
+const MINERU_DEFAULT_API_BASE = "http://127.0.0.1:8000";
+const MINERU_TIERS = new Set(["flash", "basic", "standard", "advanced"]);
+
+function normalizePdfAiMode(value) {
+  return ["local", "mineru", "direct"].includes(value) ? value : "direct";
+}
+
+function normalizeMineruApiBase(value) {
+  const source = String(value || MINERU_DEFAULT_API_BASE).trim() || MINERU_DEFAULT_API_BASE;
+  try {
+    const parsed = new URL(source);
+    if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
+      return MINERU_DEFAULT_API_BASE;
+    }
+    parsed.search = "";
+    parsed.hash = "";
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "").replace(/\/v1$/i, "") || "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch (_) {
+    return MINERU_DEFAULT_API_BASE;
+  }
+}
+
+function normalizeMineruTier(value) {
+  const tier = String(value || "").trim().toLowerCase();
+  return MINERU_TIERS.has(tier) ? tier : "standard";
+}
+
+function mineruSameOrigin(apiBase, target) {
+  try { return new URL(target).origin === new URL(apiBase).origin; }
+  catch (_) { return false; }
+}
+
+function resolveMineruUploadUrl(apiBase, target) {
+  try { return new URL(String(target || ""), `${normalizeMineruApiBase(apiBase)}/`).toString(); }
+  catch (_) { return ""; }
+}
+
+function mineruBlockText(block) {
+  if (!block || typeof block !== "object") return "";
+  const content = typeof block.content === "string"
+    ? block.content
+    : Array.isArray(block.content)
+      ? block.content.map((item) => typeof item === "string" ? item : String(item?.text || "")).join("\n")
+      : String(block.text || block.markdown || "");
+  const captions = Array.isArray(block.captions) ? block.captions.map(String).filter(Boolean) : [];
+  const footnotes = Array.isArray(block.footnotes) ? block.footnotes.map(String).filter(Boolean) : [];
+  return [content.trim(), ...captions, ...footnotes].filter(Boolean).join("\n");
+}
+
+function mineruPagesFromStructuredContent(payload = {}) {
+  return (Array.isArray(payload?.pages) ? payload.pages : []).map((page, index) => {
+    const pageIndex = Number(page?.page_idx ?? page?.page_index ?? index);
+    const blocks = (Array.isArray(page?.blocks) ? page.blocks : []).map((block) => ({
+      type: String(block?.type || "text"),
+      text: mineruBlockText(block)
+    })).filter((block) => block.text);
+    return {
+      page: Math.max(1, (Number.isFinite(pageIndex) ? pageIndex : index) + 1),
+      text: blocks.map((block) => block.text).join("\n\n").trim(),
+      blocks
+    };
+  });
+}
 
 const DEFAULT_SETTINGS = {
   papers: [],
@@ -1005,6 +1071,9 @@ const DEFAULT_SETTINGS = {
   aiDirectPdfMaxMb: 32,
   aiLocalPdfMaxPages: 500,
   aiLocalContextCharacters: 90000,
+  mineruApiBase: MINERU_DEFAULT_API_BASE,
+  mineruTier: "standard",
+  mineruSecretName: "",
   paperComposerModelOptionsVersion: 0,
   paperComposerPdfMessageCards: {},
   paperComposerDirectContextBindings: {}
@@ -1023,6 +1092,7 @@ const PAPERLIB_ICON_ALIASES = {
   "file-check-2": ["file-check", "check"],
   "file-pen-line": ["file-pen", "edit-3", "pencil", "file-text"],
   "file-plus-2": ["file-plus", "plus-square", "plus"],
+  "file-scan": ["scan-text", "file-text"],
   "file-warning": ["file", "alert-triangle"],
   files: ["copy", "file-text"],
   folders: ["folder", "library"],
@@ -8759,6 +8829,34 @@ class DeleteLocalPipelineModal extends Modal {
   onClose() { this.contentEl.empty(); }
 }
 
+class DeleteMineruCacheModal extends Modal {
+  constructor(app, plugin, onComplete) {
+    super(app);
+    this.plugin = plugin;
+    this.onComplete = onComplete;
+  }
+
+  onOpen() {
+    this.contentEl.addClass("paperlib-modal", "paperlib-mineru-modal");
+    this.contentEl.createEl("h2", { text: "清空 MinerU 缓存？" });
+    this.contentEl.createEl("p", {
+      text: "将删除 MinerU 已生成的 Markdown 与结构化解析结果。原始 PDF、论文笔记和本地解析模型不会被删除。"
+    });
+    const buttons = this.contentEl.createDiv({ cls: "paperlib-modal-buttons paperlib-mineru-modal-actions" });
+    buttons.createEl("button", { cls: "paperlib-mineru-secondary", text: "取消" })
+      .addEventListener("click", () => this.close());
+    const remove = buttons.createEl("button", { cls: "paperlib-mineru-danger", text: "清空缓存" });
+    remove.addEventListener("click", async () => {
+      remove.disabled = true;
+      await this.plugin.clearMineruCache();
+      this.onComplete?.();
+      this.close();
+    });
+  }
+
+  onClose() { this.contentEl.empty(); }
+}
+
 class CslImportModal extends Modal {
   constructor(app, plugin, onDone) {
     super(app);
@@ -9474,19 +9572,83 @@ class PaperLibrarySettingTab extends PluginSettingTab {
     containerEl.createEl("h3", { text: "Paper Composer · PDF" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "文档链路已经并入 Paper Composer：本地模式解析版面、文字、公式与表格并按问题检索全文；源文件模式把完整文档交给当前 Claude Code / Codex Agent。选区和圈选图片会自动关联完整文档。"
+      text: "文档链路已经并入 Paper Composer：可用内置本地模型、MinerU V1 服务或完整源文件建立全文上下文。选区和圈选图片仍会自动关联完整文档。"
     });
     new Setting(containerEl)
       .setName("默认 PDF 处理模式")
       .setDesc("也可在 Paper Composer 输入框顶部随时切换；切换会作用于下一次发送。")
       .addDropdown((dropdown) => dropdown
-        .addOption("local", "本地解析 + 全文检索")
+        .addOption("local", "内置本地解析 + 全文检索")
+        .addOption("mineru", "MinerU 解析 + 全文检索")
         .addOption("direct", "源文件")
         .setValue(this.plugin.getPdfAiMode())
         .onChange(async (value) => {
           await this.plugin.setPdfAiMode(value);
           this.plugin.refreshComposerPdfTrays?.();
+          this.display();
         }));
+    if (this.plugin.getPdfAiMode() === "mineru") {
+      new Setting(containerEl)
+        .setName("MinerU V1 服务地址")
+        .setDesc("本机默认地址为 http://127.0.0.1:8000；只填写服务根地址，不要附加 /v1。")
+        .addText((text) => text
+          .setPlaceholder(MINERU_DEFAULT_API_BASE)
+          .setValue(this.plugin.settings.mineruApiBase)
+          .onChange(async (value) => {
+            this.plugin.settings.mineruApiBase = String(value || "").trim();
+            this.plugin.mineruConnectionStatus = null;
+            await this.plugin.saveSettings();
+          }));
+      new Setting(containerEl)
+        .setName("MinerU 解析质量")
+        .setDesc("standard 适合日常论文；advanced 更慢，复杂公式与版面可尝试。")
+        .addDropdown((dropdown) => dropdown
+          .addOption("flash", "Flash")
+          .addOption("basic", "Basic")
+          .addOption("standard", "Standard")
+          .addOption("advanced", "Advanced")
+          .setValue(this.plugin.settings.mineruTier)
+          .onChange(async (value) => {
+            this.plugin.settings.mineruTier = normalizeMineruTier(value);
+            await this.plugin.saveSettings();
+          }));
+      const secretSetting = new Setting(containerEl)
+        .setName("MinerU API 密钥")
+        .setDesc("本机无鉴权服务可留空；远端密钥通过 Obsidian SecretStorage 保存，普通插件设置中只记录密钥名称。");
+      if (SecretComponent && requireApiVersion?.("1.11.4")) {
+        secretSetting.addComponent((el) => new SecretComponent(this.app, el)
+          .setValue(this.plugin.settings.mineruSecretName || "")
+          .onChange(async (value) => {
+            this.plugin.settings.mineruSecretName = String(value || "").trim();
+            this.plugin.mineruConnectionStatus = null;
+            await this.plugin.saveSettings();
+          }));
+      } else {
+        secretSetting.setDesc("当前 Obsidian 版本不支持安全密钥选择；本机无鉴权 MinerU 仍可使用。远端服务请升级到 Obsidian 1.11.4 或更高版本。");
+      }
+      const connection = new Setting(containerEl)
+        .setName("连接测试")
+        .setDesc(this.plugin.mineruConnectionStatus?.message || "验证 /v1/health 与 Markdown、结构化内容输出能力。")
+        .addButton((button) => button.setButtonText("测试连接").onClick(async () => {
+          button.setDisabled(true).setButtonText("正在测试…");
+          try {
+            await this.plugin.testMineruConnection();
+            new Notice("MinerU V1 服务连接正常");
+          } catch (error) {
+            new Notice(`MinerU 连接失败：${error?.message || error}`);
+          } finally {
+            this.display();
+          }
+        }));
+      connection.settingEl.toggleClass?.("is-success", this.plugin.mineruConnectionStatus?.ok === true);
+      new Setting(containerEl)
+        .setName("MinerU 解析缓存")
+        .setDesc(`${this.plugin.getMineruCacheRoot()} · 只保存 Markdown 与结构化结果，不复制原始 PDF。`)
+        .addButton((button) => button.setButtonText("打开目录").onClick(() => this.plugin.openMineruCacheDirectory()))
+        .addButton((button) => button.setButtonText("清空缓存").setWarning().onClick(() => (
+          new DeleteMineruCacheModal(this.app, this.plugin, () => this.display()).open()
+        )));
+    }
     const localPipelineStatus = this.plugin.getLocalPipelinePackStatus();
     const pipelineSetting = new Setting(containerEl)
       .setName("本地解析模型")
@@ -9998,6 +10160,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     this.claudianLoadError = null;
     this.composerPdfTabs = new Set();
     this.composerMountObserver = null;
+    this.mineruActiveTasks = new Set();
+    this.mineruConnectionStatus = null;
     await this.loadSettings();
     this.installCustomAppearanceStyle();
     this.lastAnnotationKey = "";
@@ -10191,6 +10355,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
 
   onunload() {
     this.stopExtensionServer();
+    for (const task of this.mineruActiveTasks || []) task.cancelled = true;
+    this.mineruActiveTasks?.clear?.();
     this.composerMountObserver?.disconnect?.();
     this.composerMountObserver = null;
     document.body?.removeClass?.("paperlib-paperglass-active");
@@ -11072,9 +11238,11 @@ module.exports = class PaperLibraryPlugin extends Plugin {
   }
 
   composerSentPdfDescriptor(attachment, options = {}) {
-    const local = attachment?.pdfMode === "local" && attachment?.pdfSession;
-    const detail = local
-      ? `本地上下文 · ${Math.max(0, Number(options.selectedPageCount) || 0)} 页`
+    const parsedMode = ["local", "mineru"].includes(attachment?.pdfMode) && attachment?.pdfSession
+      ? attachment.pdfMode
+      : "";
+    const detail = parsedMode
+      ? `${parsedMode === "mineru" ? "MinerU" : "本地"} 上下文 · ${Math.max(0, Number(options.selectedPageCount) || 0)} 页`
       : attachment?.localFallbackReason
         ? "源文件 · 本地解析不可用"
         : `源文件 · ${formatAIFileSize(attachment?.byteLength || 0)}`;
@@ -11082,7 +11250,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       key: String(attachment?.key || attachment?.label || uniqueId()),
       label: String(attachment?.label || "document.pdf"),
       detail,
-      mode: local ? "local" : "direct",
+      mode: parsedMode || "direct",
       contextSignature: String(options.contextSignature || "")
     };
   }
@@ -11123,7 +11291,10 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       path,
       nativePath: String(attachment?.nativePath || ""),
       byteLength: Number(attachment?.byteLength) || Number(file?.stat?.size) || 0,
-      modifiedAt: Number(file?.stat?.mtime) || nativeModifiedAt
+      modifiedAt: Number(file?.stat?.mtime) || nativeModifiedAt,
+      pdfMode: String(attachment?.pdfMode || ""),
+      parserCacheKey: String(attachment?.pdfSession?.cacheKey || ""),
+      parserEngine: String(attachment?.pdfSession?.engine || "")
     });
   }
 
@@ -11148,6 +11319,10 @@ module.exports = class PaperLibraryPlugin extends Plugin {
 
   hasComposerLocalContextBinding(tab, attachment) {
     return this.hasComposerDocumentContextBinding(tab, attachment, "local");
+  }
+
+  hasComposerMineruContextBinding(tab, attachment) {
+    return this.hasComposerDocumentContextBinding(tab, attachment, "mineru");
   }
 
   async rememberComposerDocumentContextBindings(tab, attachments, mode = "direct") {
@@ -11191,6 +11366,10 @@ module.exports = class PaperLibraryPlugin extends Plugin {
 
   async rememberComposerLocalContextBindings(tab, attachments) {
     return this.rememberComposerDocumentContextBindings(tab, attachments, "local");
+  }
+
+  async rememberComposerMineruContextBindings(tab, attachments) {
+    return this.rememberComposerDocumentContextBindings(tab, attachments, "mineru");
   }
 
   async invalidateComposerDirectContextBindings(tab, attachments) {
@@ -11992,7 +12171,9 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     const mode = this.getPdfAiMode();
     document.querySelectorAll(".paperlib-composer-settings-btn").forEach((button) => {
       button.dataset.mode = mode;
-      button.title = mode === "local" ? "文档处理：本地解析" : "文档处理：源文件";
+      button.title = mode === "local"
+        ? "文档处理：内置本地解析"
+        : mode === "mineru" ? "文档处理：MinerU" : "文档处理：源文件";
       button.setAttribute("aria-label", button.title);
     });
     document.querySelectorAll(".paperlib-composer-mode-menu").forEach((menu) => {
@@ -12025,7 +12206,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     heading.textContent = "文档处理方式";
     menu.append(heading);
     [
-      { id: "local", label: "本地解析", detail: "在本机处理并按问题检索全文", icon: "scan-text" },
+      { id: "local", label: "内置本地解析", detail: "在本机处理并建立全文上下文", icon: "scan-text" },
+      { id: "mineru", label: "MinerU", detail: "通过 MinerU V1 服务解析复杂版面", icon: "file-scan" },
       { id: "direct", label: "源文件", detail: "将完整文件直接交给当前模型", icon: "file-up" }
     ].forEach((mode) => {
       const item = document.createElement("button");
@@ -12079,7 +12261,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     const visibleAttachments = state.attachments.filter((attachment) => !attachment.workspaceLinked);
     this.decorateComposerLinkedPdfChip(tab, linkedAttachment);
     const hasPdfs = visibleAttachments.length > 0;
-    const processingCount = currentMode === "local"
+    const processingCount = currentMode !== "direct"
       ? visibleAttachments.filter((attachment) => attachment.processing).length
       : 0;
     const isVisible = hasPdfs;
@@ -12135,8 +12317,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       stale.delete(chip);
       chip.paperLibraryAttachment = attachment;
       const { label, detail, progressTrack, progressValue, remove } = chip.paperLibraryParts;
-      const showProcessing = currentMode === "local" && Boolean(attachment.processing);
-      const showProcessingError = currentMode === "local" && Boolean(attachment.processingError);
+      const showProcessing = currentMode !== "direct" && Boolean(attachment.processing);
+      const showProcessingError = currentMode !== "direct" && Boolean(attachment.processingError);
       chip.toggleClass?.("is-processing", showProcessing);
       chip.toggleClass?.("has-error", showProcessingError);
       label.textContent = attachment.label || "document.pdf";
@@ -12148,7 +12330,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
         const eta = percent >= 2 && Number.isFinite(progress.etaMs)
           ? ` · 剩余${formatAIRemainingTime(progress.etaMs)}`
           : " · 正在估算时间";
-        detail.textContent = `${progress.stage || "准备本地解析"} · ${percent}%${eta}`;
+        detail.textContent = `${progress.stage || (currentMode === "mineru" ? "准备 MinerU" : "准备本地解析")} · ${percent}%${eta}`;
       } else if (showProcessingError) {
         detail.textContent = "文件读取失败 · 点击移除后重试";
         chip.title = attachment.processingError;
@@ -12191,8 +12373,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     }) || nativeChips[0] || null) : null;
     for (const chip of nativeChips) {
       const isLinkedPdfChip = Boolean(attachment && chip === targetChip);
-      const showProcessing = currentMode === "local" && Boolean(isLinkedPdfChip && attachment?.processing);
-      const showProcessingError = currentMode === "local" && Boolean(isLinkedPdfChip && attachment?.processingError);
+      const showProcessing = currentMode !== "direct" && Boolean(isLinkedPdfChip && attachment?.processing);
+      const showProcessingError = currentMode !== "direct" && Boolean(isLinkedPdfChip && attachment?.processingError);
       chip.classList.toggle("paperlib-paper-composer-linked-pdf-chip", isLinkedPdfChip);
       chip.classList.toggle("is-processing", showProcessing);
       chip.classList.toggle("has-error", showProcessingError);
@@ -12221,7 +12403,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
         const eta = percent >= 2 && Number.isFinite(progress.etaMs)
           ? ` · 剩余${formatAIRemainingTime(progress.etaMs)}`
           : " · 正在估算时间";
-        statusText = `${progress.stage || "本地解析"} · ${percent}%${eta}`;
+        statusText = `${progress.stage || (currentMode === "mineru" ? "MinerU 解析" : "本地解析")} · ${percent}%${eta}`;
       } else if (showProcessingError) {
         statusText = "文件处理失败 · 请移除后重试";
       } else if (attachment.pdfSession) {
@@ -12230,7 +12412,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
         const totalPages = Number(session.totalPages) || processedPages;
         const characterCount = Number(session.characterCount) || 0;
         statusText = `解析完成 · ${processedPages}/${totalPages} 页 · ${characterCount} 字符${session.cacheHit ? " · 已复用" : " · 已保存"}`;
-      } else if (attachment.localFallbackReason) {
+      } else if (currentMode === "local" && attachment.localFallbackReason) {
         statusText = "本地解析不可用 · 将发送源文件";
       } else {
         statusText = `源文件 · ${formatAIFileSize(attachment.byteLength || 0)}`;
@@ -12296,6 +12478,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       if (descriptor.workspaceLinked) existing.workspaceLinked = true;
       return existing;
     }
+    const requestedMode = this.getPdfAiMode();
+    const preparationId = uniqueId();
     const attachment = {
       type: "pdf",
       label: descriptor.name || "document.pdf",
@@ -12307,7 +12491,9 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       linkedPage: Number(descriptor.linkedPage) || null,
       workspaceLinked: Boolean(descriptor.workspaceLinked),
       processing: true,
+      preparationId,
       processingStartedAt: Date.now(),
+      preparingMode: requestedMode,
       processingProgress: { stage: "读取文件", percent: 1, etaMs: null }
     };
     this.addComposerPdfAttachments(tab, [attachment]);
@@ -12318,7 +12504,10 @@ module.exports = class PaperLibraryPlugin extends Plugin {
         : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
       attachment.byteLength = bytes.byteLength;
       if (descriptor.keepBytes) attachment.pdfData = arrayBufferToBase64(bytes);
-      this.updateComposerPdfProgress(tab, attachment, { stage: "准备本地解析", percent: 2 });
+      this.updateComposerPdfProgress(tab, attachment, {
+        stage: requestedMode === "mineru" ? "准备 MinerU" : requestedMode === "local" ? "准备本地解析" : "准备源文件",
+        percent: 2
+      });
       return bytes;
     })();
     attachment.sourceReadyPromise = sourceReadyPromise;
@@ -12329,9 +12518,14 @@ module.exports = class PaperLibraryPlugin extends Plugin {
           name: attachment.label,
           path: attachment.path,
           key: attachment.key,
+          mode: requestedMode,
+          cancelToken: attachment,
           keepBytes: Boolean(descriptor.keepBytes),
-          onProgress: (progress) => this.updateComposerPdfProgress(tab, attachment, progress)
+          onProgress: (progress) => {
+            if (attachment.preparationId === preparationId) this.updateComposerPdfProgress(tab, attachment, progress);
+          }
         });
+        if (attachment.preparationId !== preparationId) return attachment;
         Object.assign(attachment, prepared, {
           nativePath: attachment.nativePath,
           metadataText: attachment.metadataText,
@@ -12341,10 +12535,15 @@ module.exports = class PaperLibraryPlugin extends Plugin {
         this.updateComposerPdfProgress(tab, attachment, { stage: "解析完成", percent: 100, etaMs: 0 });
         return attachment;
       } catch (error) {
-        attachment.processing = false;
-        attachment.processingError = String(error?.message || error);
+        if (attachment.preparationId === preparationId) {
+          attachment.processing = false;
+          attachment.processingError = String(error?.message || error);
+          attachment.processingErrorMode = requestedMode;
+        }
         console.error("Paper Library: document attachment preparation failed", error);
-        if (!attachment.cancelled) new Notice(`文件处理失败：${attachment.processingError}`);
+        if (!attachment.cancelled && attachment.preparationId === preparationId) {
+          new Notice(`文件处理失败：${attachment.processingError}`);
+        }
         throw error;
       } finally {
         this.renderComposerPdfTray(tab);
@@ -12422,6 +12621,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       const directContextPaths = [];
       const directBindingsToRemember = [];
       const localBindingsToRemember = [];
+      const mineruBindingsToRemember = [];
       const sentPdfCards = [];
       for (const attachment of pending) {
         const prepared = await this.preparePdfAttachmentForMode(attachment);
@@ -12451,10 +12651,11 @@ module.exports = class PaperLibraryPlugin extends Plugin {
             }
           }
         } else {
-          const inflightKey = `local:${this.composerDirectContextSourceFingerprint(prepared)}`;
+          const parsedMode = prepared.pdfMode === "mineru" ? "mineru" : "local";
+          const inflightKey = `${parsedMode}:${this.composerDirectContextSourceFingerprint(prepared)}`;
           const introduceLocalContext = !prepared.workspaceLinked
             || (!state.directContextInflight.has(inflightKey)
-              && !this.hasComposerLocalContextBinding(tab, prepared));
+              && !this.hasComposerDocumentContextBinding(tab, prepared, parsedMode));
           if (introduceLocalContext) {
             const initialContext = this.buildInitialLocalPdfContext(prepared.pdfSession);
             sentPdfCards.push(this.composerSentPdfDescriptor(prepared, {
@@ -12464,7 +12665,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
             if (prepared.workspaceLinked) {
               state.directContextInflight.add(inflightKey);
               directInflightKeys.push(inflightKey);
-              localBindingsToRemember.push(prepared);
+              if (parsedMode === "mineru") mineruBindingsToRemember.push(prepared);
+              else localBindingsToRemember.push(prepared);
             }
             localBlocks.push([
               `### ${prepared.label || "PDF"}`,
@@ -12477,8 +12679,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       if (localBlocks.length) {
         request.text = [
           request.text || visibleContent,
-          "## Paper Library 本地 PDF 全文上下文",
-          "以下内容由本地解析生成，仅在当前模型会话首次建立文档上下文时注入。后续消息请沿用这份上下文，并在回答中标注页码。",
+          "## Paper Library PDF 解析上下文",
+          "以下内容由所选解析器生成，仅在当前模型会话首次建立文档上下文时注入。后续消息请沿用这份上下文，并在回答中标注页码。",
           ...localBlocks
         ].filter(Boolean).join("\n\n");
       }
@@ -12531,6 +12733,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       try {
         await this.rememberComposerDirectContextBindings(tab, directBindingsToRemember);
         await this.rememberComposerLocalContextBindings(tab, localBindingsToRemember);
+        await this.rememberComposerMineruContextBindings(tab, mineruBindingsToRemember);
       } catch (error) {
         console.warn("Paper Library: failed to persist document context binding", error);
       }
@@ -12895,21 +13098,22 @@ module.exports = class PaperLibraryPlugin extends Plugin {
   }
 
   getPdfAiMode() {
-    return this.settings.pdfAiMode === "local" ? "local" : "direct";
+    return normalizePdfAiMode(this.settings.pdfAiMode);
   }
 
   async setPdfAiMode(mode) {
-    this.settings.pdfAiMode = mode === "local" ? "local" : "direct";
+    this.settings.pdfAiMode = normalizePdfAiMode(mode);
     // Reflect the selected transport immediately. Local preparation may safely
     // continue in the background so switching back can reuse its result.
     this.refreshComposerModeButtons();
     this.refreshComposerPdfTrays();
     await this.saveSettings();
-    if (this.settings.pdfAiMode === "local") {
+    if (this.settings.pdfAiMode !== "direct") {
       for (const tab of this.composerPdfTabs || []) {
         const state = this.getComposerPdfState(tab);
         for (const attachment of state?.attachments || []) {
-          if (!attachment.processing && !attachment.pdfSession) {
+          if (attachment.pdfMode !== this.settings.pdfAiMode
+            && attachment.preparingMode !== this.settings.pdfAiMode) {
             this.startComposerPdfLocalPreparation(tab, attachment);
           }
         }
@@ -12934,13 +13138,24 @@ module.exports = class PaperLibraryPlugin extends Plugin {
   }
 
   startComposerPdfLocalPreparation(tab, attachment) {
-    if (!attachment || attachment.cancelled || attachment.processing || attachment.pdfSession) {
+    const requestedMode = this.getPdfAiMode();
+    if (requestedMode === "direct") return null;
+    if (!attachment || attachment.cancelled || attachment.pdfMode === requestedMode
+      || (attachment.processing && attachment.preparingMode === requestedMode)) {
       return attachment?.processingPromise || null;
     }
+    const preparationId = uniqueId();
     attachment.processing = true;
+    attachment.preparationId = preparationId;
     attachment.processingError = "";
+    attachment.processingErrorMode = "";
+    attachment.preparingMode = requestedMode;
     attachment.processingStartedAt = Date.now();
-    attachment.processingProgress = { stage: "准备本地解析", percent: 1, etaMs: null };
+    attachment.processingProgress = {
+      stage: requestedMode === "mineru" ? "准备 MinerU" : "准备本地解析",
+      percent: 1,
+      etaMs: null
+    };
     this.renderComposerPdfTray(tab);
     const keepBytes = Boolean(attachment.pdfData) || (!attachment.path && !attachment.nativePath);
     attachment.processingPromise = (async () => {
@@ -12954,9 +13169,14 @@ module.exports = class PaperLibraryPlugin extends Plugin {
           path: attachment.path,
           key: attachment.key,
           cacheKey: attachment.key,
+          mode: requestedMode,
+          cancelToken: attachment,
           keepBytes,
-          onProgress: (progress) => this.updateComposerPdfProgress(tab, attachment, progress)
+          onProgress: (progress) => {
+            if (attachment.preparationId === preparationId) this.updateComposerPdfProgress(tab, attachment, progress);
+          }
         });
+        if (attachment.preparationId !== preparationId) return attachment;
         Object.assign(attachment, prepared, {
           processing: false,
           processingError: ""
@@ -12964,9 +13184,14 @@ module.exports = class PaperLibraryPlugin extends Plugin {
         this.updateComposerPdfProgress(tab, attachment, { stage: "解析完成", percent: 100, etaMs: 0 });
         return attachment;
       } catch (error) {
-        attachment.processing = false;
-        attachment.processingError = String(error?.message || error);
-        if (!attachment.cancelled) new Notice(`文件处理失败：${attachment.processingError}`);
+        if (attachment.preparationId === preparationId) {
+          attachment.processing = false;
+          attachment.processingError = String(error?.message || error);
+          attachment.processingErrorMode = requestedMode;
+        }
+        if (!attachment.cancelled && attachment.preparationId === preparationId) {
+          new Notice(`文件处理失败：${attachment.processingError}`);
+        }
         throw error;
       } finally {
         this.renderComposerPdfTray(tab);
@@ -12974,6 +13199,310 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     })();
     attachment.processingPromise.catch(() => {});
     return attachment.processingPromise;
+  }
+
+  getMineruApiBase() {
+    return normalizeMineruApiBase(this.settings?.mineruApiBase);
+  }
+
+  getMineruCacheRoot() {
+    return normalizePath(`${this.manifest.dir || `.obsidian/plugins/${this.manifest.id}`}/mineru-cache/v${MINERU_CACHE_VERSION}`);
+  }
+
+  async getMineruApiKey() {
+    const name = String(this.settings?.mineruSecretName || "").trim();
+    if (!name || !this.app?.secretStorage?.getSecret) return "";
+    try { return String(await this.app.secretStorage.getSecret(name) || "").trim(); }
+    catch (error) {
+      throw new Error(`无法读取 MinerU 安全密钥：${error?.message || error}`);
+    }
+  }
+
+  async ensureAdapterDirectory(path) {
+    const adapter = this.app.vault.adapter;
+    const normalized = normalizePath(path);
+    let current = "";
+    for (const part of normalized.split("/").filter(Boolean)) {
+      current = current ? `${current}/${part}` : part;
+      if (!await adapter.exists(current)) await adapter.mkdir(current);
+    }
+  }
+
+  async sha256ArrayBuffer(buffer) {
+    const bytes = buffer instanceof ArrayBuffer
+      ? buffer
+      : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    if (globalThis.crypto?.subtle) {
+      const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+      return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+    }
+    try { return require("crypto").createHash("sha256").update(Buffer.from(bytes)).digest("hex"); }
+    catch (_) { throw new Error("当前环境无法计算 PDF 的 SHA-256"); }
+  }
+
+  mineruResponseJson(response, label = "MinerU") {
+    if (response?.json && typeof response.json === "object") return response.json;
+    try { return JSON.parse(String(response?.text || "{}")); }
+    catch (_) { throw new Error(`${label} 返回了无法识别的数据`); }
+  }
+
+  async mineruRequest(pathOrUrl, options = {}) {
+    const apiBase = this.getMineruApiBase();
+    const url = /^https?:\/\//i.test(pathOrUrl)
+      ? pathOrUrl
+      : `${apiBase}/v1/${String(pathOrUrl || "").replace(/^\/+/, "")}`;
+    const headers = { ...(options.headers || {}) };
+    if (options.authorize !== false) {
+      const token = await this.getMineruApiKey();
+      if (token) headers.Authorization = `Bearer ${token}`;
+    }
+    const response = await requestUrl({
+      url,
+      method: options.method || "GET",
+      headers,
+      body: options.body,
+      throw: false
+    });
+    if (response.status < 200 || response.status >= 300) {
+      let detail = "";
+      try {
+        const payload = this.mineruResponseJson(response);
+        detail = String(payload?.detail || payload?.message || payload?.error || "");
+      } catch (_) { detail = String(response?.text || "").slice(0, 240); }
+      throw new Error(`MinerU 请求失败（HTTP ${response.status}）${detail ? `：${detail}` : ""}`);
+    }
+    return response;
+  }
+
+  async testMineruConnection() {
+    try {
+      const response = await this.mineruRequest("health");
+      const payload = this.mineruResponseJson(response, "MinerU 健康检查");
+      // /health may be public even when parse jobs require a key. Exercise one
+      // authenticated read so the settings test catches a missing/invalid key.
+      await this.mineruRequest("parse/jobs?limit=1");
+      const formats = payload?.features?.output_formats || payload?.output_formats || [];
+      if (Array.isArray(formats) && formats.length
+        && !(formats.includes("markdown") && formats.includes("structured_content"))) {
+        throw new Error("该服务未声明 Markdown 与 structured_content 输出能力");
+      }
+      this.mineruConnectionStatus = {
+        ok: true,
+        message: `连接正常 · ${payload?.version ? `MinerU ${payload.version}` : this.getMineruApiBase()}`
+      };
+      return payload;
+    } catch (error) {
+      this.mineruConnectionStatus = { ok: false, message: `连接失败：${error?.message || error}` };
+      throw error;
+    }
+  }
+
+  async readMineruCache(cacheKey) {
+    const adapter = this.app.vault.adapter;
+    const root = normalizePath(`${this.getMineruCacheRoot()}/${cacheKey}`);
+    const metadataPath = normalizePath(`${root}/metadata.json`);
+    const markdownPath = normalizePath(`${root}/document.md`);
+    const structuredPath = normalizePath(`${root}/structured-content.json`);
+    if (!await adapter.exists(metadataPath)
+      || !await adapter.exists(markdownPath)
+      || !await adapter.exists(structuredPath)) return null;
+    try {
+      const metadata = JSON.parse(await adapter.read(metadataPath));
+      if (metadata.version !== MINERU_CACHE_VERSION || metadata.cacheKey !== cacheKey) return null;
+      const documentMarkdown = await adapter.read(markdownPath);
+      const structured = JSON.parse(await adapter.read(structuredPath));
+      return { metadata, documentMarkdown, structured, root };
+    } catch (_) { return null; }
+  }
+
+  async writeMineruCache(cacheKey, payload) {
+    const adapter = this.app.vault.adapter;
+    const root = normalizePath(`${this.getMineruCacheRoot()}/${cacheKey}`);
+    await this.ensureAdapterDirectory(root);
+    await adapter.write(normalizePath(`${root}/document.md`), String(payload.documentMarkdown || ""));
+    await adapter.write(normalizePath(`${root}/structured-content.json`), JSON.stringify(payload.structured || {}, null, 2));
+    await adapter.write(normalizePath(`${root}/metadata.json`), JSON.stringify(payload.metadata || {}, null, 2));
+    return root;
+  }
+
+  async clearMineruCache() {
+    const adapter = this.app.vault.adapter;
+    const root = this.getMineruCacheRoot();
+    if (await adapter.exists(root)) await adapter.rmdir(root, true);
+    new Notice("MinerU 解析缓存已清空");
+  }
+
+  async openMineruCacheDirectory() {
+    const root = this.getMineruCacheRoot();
+    await this.ensureAdapterDirectory(root);
+    if (this.isMobileApp() || !this.app.vault.adapter.getFullPath) {
+      new Notice(`MinerU 缓存：${root}`);
+      return;
+    }
+    try {
+      const result = await require("electron").shell.openPath(this.app.vault.adapter.getFullPath(root));
+      if (result) throw new Error(result);
+    } catch (error) { new Notice(`无法打开缓存目录：${error?.message || error}`); }
+  }
+
+  mineruOutputFileId(outputFiles, key) {
+    const value = outputFiles?.[key];
+    return String(typeof value === "string" ? value : value?.file_id || value?.id || "");
+  }
+
+  async parsePdfWithMineruV1(buffer, options = {}) {
+    const bytes = buffer instanceof ArrayBuffer
+      ? buffer
+      : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    const sourceHash = await this.sha256ArrayBuffer(bytes);
+    const apiBase = this.getMineruApiBase();
+    const tier = normalizeMineruTier(this.settings?.mineruTier);
+    const cacheDescriptor = JSON.stringify({
+      version: MINERU_CACHE_VERSION,
+      sourceHash,
+      apiBase,
+      tier,
+      outputFormats: ["markdown", "structured_content"]
+    });
+    const cacheKey = await this.sha256ArrayBuffer(new TextEncoder().encode(cacheDescriptor));
+    const cached = await this.readMineruCache(cacheKey);
+    const buildSession = (documentMarkdown, structured, metadata = {}, cacheHit = false) => {
+      const pages = mineruPagesFromStructuredContent(structured);
+      if (!pages.length && String(documentMarkdown || "").trim()) {
+        pages.push({ page: 1, text: String(documentMarkdown).trim(), blocks: [] });
+      }
+      return {
+        version: 1,
+        engine: "mineru-v1",
+        provider: "mineru",
+        tier,
+        parserVersion: String(structured?.metadata?.producer?.version || metadata.parserVersion || ""),
+        name: options.name || metadata.sourceName || "document.pdf",
+        path: options.path || metadata.sourcePath || "",
+        totalPages: pages.length,
+        processedPages: pages.length,
+        truncated: false,
+        characterCount: pages.reduce((sum, page) => sum + page.text.length, 0),
+        pages,
+        cacheKey,
+        cacheHit,
+        documentMarkdown: String(documentMarkdown || "")
+      };
+    };
+    if (cached) return buildSession(cached.documentMarkdown, cached.structured, cached.metadata, true);
+
+    const task = { cancelled: false, jobId: "" };
+    this.mineruActiveTasks ??= new Set();
+    this.mineruActiveTasks.add(task);
+    const cancelled = () => Boolean(task.cancelled || options.cancelToken?.cancelled);
+    const ensureActive = () => {
+      if (cancelled()) throw new Error("MinerU 解析已取消");
+    };
+    const jsonRequest = async (path, method, body) => {
+      const response = await this.mineruRequest(path, {
+        method,
+        headers: body === undefined ? {} : { "Content-Type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body)
+      });
+      return this.mineruResponseJson(response);
+    };
+    try {
+      ensureActive();
+      options.onProgress?.({ stage: "MinerU 创建上传", percent: 3 });
+      const uploadEnvelope = await jsonRequest("uploads", "POST", {
+        filename: options.name || "document.pdf",
+        bytes: bytes.byteLength,
+        mime_type: "application/pdf",
+        purpose: "parse",
+        sha256sum: sourceHash
+      });
+      const upload = uploadEnvelope?.data || uploadEnvelope;
+      let fileId = String(upload?.file?.id || upload?.file_id || "");
+      if (String(upload?.status || "pending") !== "completed") {
+        const uploadUrl = resolveMineruUploadUrl(apiBase, upload?.upload_url || upload?.uploadUrl);
+        const uploadId = String(upload?.id || "");
+        if (!uploadUrl || !uploadId) throw new Error("MinerU 没有返回有效的上传地址");
+        ensureActive();
+        options.onProgress?.({ stage: "上传到 MinerU", percent: 12 });
+        const uploadHeaders = { ...(upload?.upload_headers || upload?.uploadHeaders || {}) };
+        await this.mineruRequest(uploadUrl, {
+          method: String(upload?.upload_method || upload?.uploadMethod || "PUT").toUpperCase(),
+          headers: uploadHeaders,
+          body: bytes,
+          authorize: mineruSameOrigin(apiBase, uploadUrl)
+        });
+        ensureActive();
+        const completedEnvelope = await jsonRequest(`uploads/${encodeURIComponent(uploadId)}/complete`, "POST", {});
+        const completed = completedEnvelope?.data || completedEnvelope;
+        fileId = String(completed?.file?.id || completed?.file_id || fileId);
+      }
+      if (!fileId) throw new Error("MinerU 上传完成后没有返回文件 ID");
+
+      options.onProgress?.({ stage: "MinerU 排队解析", percent: 20 });
+      const jobEnvelope = await jsonRequest("parse/jobs", "POST", {
+        files: [{ source: { type: "file_id", file_id: fileId } }],
+        tier,
+        output_formats: ["markdown", "structured_content"]
+      });
+      let job = jobEnvelope?.data || jobEnvelope;
+      task.jobId = String(job?.id || job?.job_id || "");
+      if (!task.jobId) throw new Error("MinerU 没有返回解析任务 ID");
+      const maxPolls = Math.max(1, Number(options.maxPolls) || 200);
+      const pollIntervalMs = Math.max(0, Number(options.pollIntervalMs ?? 3000));
+      for (let poll = 0; poll < maxPolls; poll += 1) {
+        ensureActive();
+        const status = String(job?.status || "").toLowerCase();
+        if (["completed", "partial", "failed", "canceled", "cancelled"].includes(status)) break;
+        options.onProgress?.({
+          stage: status === "running" ? "MinerU 正在解析" : "等待 MinerU",
+          percent: Math.min(88, 28 + poll * 2)
+        });
+        if (pollIntervalMs) await new Promise((resolve) => globalThis.setTimeout(resolve, pollIntervalMs));
+        const polledEnvelope = await jsonRequest(`parse/jobs/${encodeURIComponent(task.jobId)}`, "GET");
+        job = polledEnvelope?.data || polledEnvelope;
+      }
+      ensureActive();
+      const status = String(job?.status || "").toLowerCase();
+      if (status !== "completed") {
+        const detail = String(job?.error?.message || job?.error || job?.message || "");
+        if (!status || ["queued", "running"].includes(status)) throw new Error("MinerU 解析等待超时");
+        throw new Error(`MinerU 解析${status === "partial" ? "只完成了部分文件" : "失败"}${detail ? `：${detail}` : ""}`);
+      }
+      const fileResult = (Array.isArray(job?.files) ? job.files[0] : null) || job?.file || {};
+      const outputFiles = fileResult?.output_files || job?.output_files || {};
+      const markdownId = this.mineruOutputFileId(outputFiles, "markdown");
+      const structuredId = this.mineruOutputFileId(outputFiles, "structured_content");
+      if (!markdownId || !structuredId) throw new Error("MinerU 任务完成，但缺少 Markdown 或结构化输出");
+      options.onProgress?.({ stage: "下载 MinerU 结果", percent: 92 });
+      const [markdownResponse, structuredResponse] = await Promise.all([
+        this.mineruRequest(`files/${encodeURIComponent(markdownId)}/content`),
+        this.mineruRequest(`files/${encodeURIComponent(structuredId)}/content`)
+      ]);
+      const documentMarkdown = String(markdownResponse?.text || "");
+      const structured = this.mineruResponseJson(structuredResponse, "MinerU structured_content");
+      options.onProgress?.({ stage: "保存 MinerU 缓存", percent: 97 });
+      const metadata = {
+        version: MINERU_CACHE_VERSION,
+        cacheKey,
+        sourceHash,
+        sourceName: options.name || "document.pdf",
+        sourcePath: options.path || "",
+        apiBase,
+        tier,
+        parserVersion: String(structured?.metadata?.producer?.version || ""),
+        createdAt: new Date().toISOString()
+      };
+      await this.writeMineruCache(cacheKey, { documentMarkdown, structured, metadata });
+      return buildSession(documentMarkdown, structured, metadata, false);
+    } catch (error) {
+      if (cancelled() && task.jobId) {
+        try { await this.mineruRequest(`parse/jobs/${encodeURIComponent(task.jobId)}`, { method: "DELETE" }); }
+        catch (_) {}
+      }
+      throw error;
+    } finally {
+      this.mineruActiveTasks.delete(task);
+    }
   }
 
   getLocalPipelinePackStatus() {
@@ -13475,7 +14004,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
 
   buildInitialLocalPdfContext(session) {
     if (!session?.pages?.length) return {
-      text: "[本地解析没有提取到文字；可能是扫描件或模型包尚未完成文字识别。]",
+      text: "[PDF 解析没有提取到文字；可能是扫描件或解析服务尚未完成文字识别。]",
       selectedPages: [],
       characterCount: 0,
       truncated: false
@@ -13501,9 +14030,11 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     }
     const truncated = selectedPages.length < session.pages.filter((page) => String(page.text || "").trim()).length
       || cutByCharacterLimit;
+    const parserLabel = session.provider === "mineru" || session.engine === "mineru-v1" ? "MinerU" : "内置本地解析";
     const header = [
       `PDF：${session.name}`,
-      `本地解析覆盖：${session.processedPages}/${session.totalPages} 页，${session.characterCount} 字符`,
+      `解析方式：${parserLabel}`,
+      `解析覆盖：${session.processedPages}/${session.totalPages} 页，${session.characterCount} 字符`,
       `本次一次性注入：${selectedPages.length} 页，${used} 字符。后续消息不会再次注入或检索。`,
       "回答时请引用页码；如当前会话中的证据不足，请明确说明。"
     ];
@@ -13524,7 +14055,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     const bytes = buffer instanceof ArrayBuffer ? buffer : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
     const byteLength = bytes.byteLength;
     const maxBytes = Math.max(1, Number(this.settings.aiDirectPdfMaxMb) || 32) * 1024 * 1024;
-    if (this.getPdfAiMode() === "direct" && byteLength > maxBytes) {
+    const mode = normalizePdfAiMode(options.mode || this.getPdfAiMode());
+    if (mode === "direct" && byteLength > maxBytes) {
       throw new Error(`PDF 为 ${formatAIFileSize(byteLength)}，超过原文件模式 ${this.settings.aiDirectPdfMaxMb || 32} MB 的安全上限`);
     }
     const base = {
@@ -13534,8 +14066,18 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       byteLength,
       key: options.key || `pdf:${options.path || options.name || byteLength}`
     };
-    if (this.getPdfAiMode() === "direct") {
+    if (mode === "direct") {
       return { ...base, detail: `原始 PDF · ${formatAIFileSize(byteLength)}`, pdfData: arrayBufferToBase64(bytes), pdfMode: "direct" };
+    }
+    if (mode === "mineru") {
+      const session = await this.parsePdfWithMineruV1(bytes, options);
+      return {
+        ...base,
+        detail: `MinerU 全文 · ${session.processedPages} 页 · ${session.characterCount} 字符`,
+        pdfSession: session,
+        pdfData: options.keepBytes ? arrayBufferToBase64(bytes) : "",
+        pdfMode: "mineru"
+      };
     }
     let session = null;
     let localError = "";
@@ -13828,26 +14370,29 @@ module.exports = class PaperLibraryPlugin extends Plugin {
   async preparePdfAttachmentForMode(attachment) {
     if (attachment?.type !== "pdf") return attachment;
     const mode = this.getPdfAiMode();
-    if (mode === "local" && attachment.processingPromise) await attachment.processingPromise;
+    if (mode !== "direct" && attachment.processingPromise && attachment.preparingMode === mode) {
+      await attachment.processingPromise;
+    }
     if (mode === "direct" && !attachment.pdfData && !attachment.path && !attachment.nativePath && attachment.sourceReadyPromise) {
       await attachment.sourceReadyPromise;
     }
-    // A failed background local preparation must never prevent source-file mode.
-    if (mode === "local" && attachment.processingError) throw new Error(attachment.processingError);
+    // A failed background parse must never prevent source-file mode or another parser.
+    if (mode !== "direct" && attachment.processingError && attachment.processingErrorMode === mode) {
+      throw new Error(attachment.processingError);
+    }
     if (mode === "direct" && (attachment.nativePath || attachment.path)) return { ...attachment, pdfMode: "direct" };
     if (mode === "direct" && attachment.pdfData) return { ...attachment, pdfMode: "direct" };
-    if (mode === "local" && attachment.pdfSession) return { ...attachment, pdfMode: "local" };
+    if (mode !== "direct" && attachment.pdfSession && attachment.pdfMode === mode) return { ...attachment, pdfMode: mode };
     let buffer = null;
-    if (attachment.pdfData) buffer = base64ToArrayBuffer(attachment.pdfData);
-    else if (attachment.path) {
-      const file = this.app.vault.getAbstractFileByPath(normalizePath(attachment.path));
-      if (file) buffer = await this.app.vault.readBinary(file);
-    }
+    try { buffer = await this.composerPdfAttachmentBytes(attachment); }
+    catch (_) {}
     if (!buffer) throw new Error(`无法重新读取 PDF：${attachment.label || attachment.path || "未知文件"}`);
     const rebuilt = await this.createPdfAIAttachment(buffer, {
       name: attachment.label,
       path: attachment.path,
       key: attachment.key,
+      mode,
+      cancelToken: attachment,
       keepBytes: Boolean(attachment.pdfData)
     });
     return { ...attachment, ...rebuilt, linkedPage: attachment.linkedPage || null };
@@ -13900,11 +14445,14 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     this.settings.extensionServerPort = Math.min(65535, Math.max(1024,
       Math.floor(Number(stored?.extensionServerPort)) || DEFAULT_SETTINGS.extensionServerPort));
     this.settings.extensionToken = String(stored?.extensionToken || "").trim();
-    this.settings.pdfAiMode = stored?.pdfAiMode === "local" ? "local" : "direct";
+    this.settings.pdfAiMode = normalizePdfAiMode(stored?.pdfAiMode);
     this.settings.aiDirectPdfMaxMb = Math.min(100, Math.max(1, Number(stored?.aiDirectPdfMaxMb) || DEFAULT_SETTINGS.aiDirectPdfMaxMb));
     this.settings.aiLocalPdfMaxPages = Math.min(2000, Math.max(10, Number(stored?.aiLocalPdfMaxPages) || DEFAULT_SETTINGS.aiLocalPdfMaxPages));
     this.settings.aiLocalContextCharacters = Math.min(300000, Math.max(12000,
       Number(stored?.aiLocalContextCharacters) || DEFAULT_SETTINGS.aiLocalContextCharacters));
+    this.settings.mineruApiBase = normalizeMineruApiBase(stored?.mineruApiBase);
+    this.settings.mineruTier = normalizeMineruTier(stored?.mineruTier);
+    this.settings.mineruSecretName = String(stored?.mineruSecretName || "").trim();
     this.settings.paperComposerPdfMessageCards = stored?.paperComposerPdfMessageCards
       && typeof stored.paperComposerPdfMessageCards === "object"
       && !Array.isArray(stored.paperComposerPdfMessageCards)
@@ -14324,6 +14872,10 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       : normalized.activeCustomAppearanceId;
     normalized.appearanceProtocolVersion = APPEARANCE_PROTOCOL_VERSION;
     normalized.doubleClickOpenMode = normalizeDoubleClickOpenMode(normalized.doubleClickOpenMode);
+    normalized.pdfAiMode = normalizePdfAiMode(normalized.pdfAiMode);
+    normalized.mineruApiBase = normalizeMineruApiBase(normalized.mineruApiBase);
+    normalized.mineruTier = normalizeMineruTier(normalized.mineruTier);
+    normalized.mineruSecretName = String(normalized.mineruSecretName || "").trim();
     normalized.papers = Array.isArray(normalized.papers) ? normalized.papers : [];
     normalized.paperDeletionTombstones = normalized.paperDeletionTombstones
       && typeof normalized.paperDeletionTombstones === "object"
@@ -23301,4 +23853,15 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     if (!file) return new Notice("找不到 PDF，请在编辑论文中检查路径");
     this.app.workspace.getLeaf("tab").openFile(file);
   }
+};
+
+module.exports.mineruInternals = {
+  MINERU_CACHE_VERSION,
+  MINERU_DEFAULT_API_BASE,
+  normalizePdfAiMode,
+  normalizeMineruApiBase,
+  normalizeMineruTier,
+  mineruSameOrigin,
+  resolveMineruUploadUrl,
+  mineruPagesFromStructuredContent
 };

@@ -13,7 +13,7 @@
 [![Platforms](https://img.shields.io/badge/platforms-desktop%20%7C%20mobile-24415e?style=flat-square)](#平台支持)
 [![License](https://img.shields.io/badge/license-MIT-2f7a61?style=flat-square)](LICENSE)
 
-[下载安装](#安装) · [核心能力](#一个-vault完整覆盖研究流程) · [Paper Composer](#paper-composer) · [本地解析](#两种文档上下文模式) · [开发](#开发)
+[下载安装](#安装) · [核心能力](#一个-vault完整覆盖研究流程) · [Paper Composer](#paper-composer) · [PDF 解析](#三种文档上下文模式) · [开发](#开发)
 
 </div>
 
@@ -104,18 +104,36 @@ Paper Composer 是 Paper Library 内置的智能写作与研究侧栏。它与�
 
 > Paper Library 不保存第三方 OAuth token。登录与授权由对应的官方命令行工具管理。
 
-## 两种文档上下文模式
+## 三种文档上下文模式
 
 在输入框上方的设置按钮中，可以随时为当前 linked content 选择处理方式。
 
 | 模式 | 工作方式 | 适合场景 |
 |---|---|---|
 | **源文件** | 将完整源文件交给当前 AI；这是默认模式 | 模型原生支持文件、多模态理解或需要完整格式时 |
-| **本地解析** | 在本机依次完成版面、文字、表格与公式处理，并生成结构化 Markdown | 希望复用解析缓存、减少重复处理或获得稳定文本结构时 |
+| **内置本地解析** | 在本机依次完成版面、文字、表格与公式处理，并生成结构化 Markdown | 离线使用、希望数据留在本机时 |
+| **MinerU** | 调用兼容 MinerU 4 的 V1 服务，读取 Markdown 与 `structured_content` | 已部署 MinerU，或需要处理复杂公式、表格和版面时 |
 
 文档正文只在当前会话首次建立 linked content 时注入一次；后续消息复用既有上下文，不会每轮重复发送全文或重复检索。解析结果会保存在本地缓存中，卡片实时显示阶段、进度和预计时间。
 
 本地运行时与模型按需下载，不随插件仓库分发，也不依赖 PyTorch。组件缺失时不会伪装成本地解析成功，仍可切换回源文件模式继续使用。
+
+### MinerU 设置与缓存
+
+1. 启动兼容 MinerU 4 V1 的 API 服务；本机默认地址是 `http://127.0.0.1:8000`。
+2. 在「Paper Library 设置 → Paper Composer · PDF」选择 **MinerU 解析 + 全文检索**。
+3. 填写服务地址与解析质量；远端服务需要密钥时，通过 Obsidian SecretStorage 选择密钥。
+4. 点击「测试连接」，确认服务支持 Markdown 与结构化内容输出。
+
+示例本机服务：
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install -U "mineru>=4.0,<5"
+mineru-kit api-server --host 127.0.0.1 --port 8000 --tier standard
+```
+
+MinerU 结果保存在 `<Vault>/.obsidian/plugins/paper-library/mineru-cache/v1/`。每个 PDF 按文件哈希、服务地址和质量档位生成独立缓存，只保存 `document.md`、`structured-content.json` 与元数据，不复制原始 PDF。设置页可以打开或清空该目录。此实现使用 MinerU 4 V1 的上传与解析任务协议，不支持旧版 `/file_parse` 接口。
 
 ## 一条自然的工作流
 

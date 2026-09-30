@@ -9,8 +9,9 @@ const manifest = JSON.parse(fs.readFileSync(path.join(root, "pipeline", "models.
 const worker = fs.readFileSync(path.join(root, "pipeline", "worker.cjs"), "utf8");
 
 assert.ok(main.includes('pdfAiMode: "direct"'), "source-file mode must be the default");
-assert.ok(main.includes('stored?.pdfAiMode === "local" ? "local" : "direct"'), "missing saved mode must resolve to source-file mode");
-assert.ok(main.includes('{ id: "local", label: "本地解析"'), "Composer mode menu must expose local processing");
+assert.ok(main.includes('this.settings.pdfAiMode = normalizePdfAiMode(stored?.pdfAiMode)'), "saved mode normalization must recognize MinerU and preserve the direct default");
+assert.ok(main.includes('{ id: "local", label: "内置本地解析"'), "Composer mode menu must expose local processing");
+assert.ok(main.includes('{ id: "mineru", label: "MinerU"'), "Composer mode menu must expose MinerU V1 processing");
 assert.ok(main.includes('{ id: "direct", label: "源文件"'), "Composer must expose direct PDF mode");
 assert.ok(main.includes("sendClaudianMessageWithPdf"), "PDF preparation must be part of the Composer send path");
 assert.ok(main.includes("turnRequestOverride: request"), "Composer must separate visible text from injected PDF context");
@@ -33,15 +34,20 @@ assert.ok(main.includes('prepared.pdfMode === "direct"'), "the send path must ho
 assert.ok(main.includes("localFallbackReason"), "automatic source-file fallback must remain visible to the user");
 assert.ok(main.includes("queueComposerPdfAttachment"), "dropped documents must appear before local preparation finishes");
 assert.ok(main.includes("startComposerPdfLocalPreparation"), "switching to local mode must immediately prepare existing attachments");
-assert.ok(main.includes('const showProcessing = currentMode === "local" && Boolean(attachment.processing)'), "source-file mode must not keep showing background local progress");
+assert.ok(main.includes('const showProcessing = currentMode !== "direct" && Boolean(attachment.processing)'), "source-file mode must not keep showing parser progress");
 assert.ok(main.includes('progressTrack.style.display = showProcessing ? "block" : "none"'), "document card progress must follow the selected mode");
-assert.ok(main.includes('if (mode === "local" && attachment.processingError)'), "background local errors must not block source-file sends");
+assert.ok(main.includes('if (mode !== "direct" && attachment.processingError && attachment.processingErrorMode === mode)'), "parser-specific errors must not block source-file or alternate-parser sends");
 assert.ok(main.includes("hasComposerDirectContextBinding"), "linked source documents must track established model-session context");
 assert.ok(main.includes("introduce the actual source document only once per model session"), "linked source documents must not be reintroduced on every turn");
 assert.ok(main.includes("directContextPaths.push(path)"), "linked source paths must remain available without repeating document instructions");
 assert.ok(main.includes("rememberComposerDirectContextBindings"), "successful source context admission must be persisted");
 assert.ok(main.includes("hasComposerLocalContextBinding"), "linked local documents must track established model-session context");
 assert.ok(main.includes("rememberComposerLocalContextBindings"), "successful local context admission must be persisted");
+assert.ok(main.includes("rememberComposerMineruContextBindings"), "successful MinerU context admission must be persisted");
+assert.ok(main.includes("parsePdfWithMineruV1"), "MinerU mode must use the V1 upload and parse-job API");
+assert.ok(main.includes('getMineruCacheRoot()'), "MinerU must use its own versioned cache root");
+assert.ok(main.includes('mineruSecretName: ""'), "settings may persist only the SecretStorage key name");
+assert.ok(!main.includes('mineruApiKey: ""'), "the MinerU API key must never be stored in ordinary plugin settings");
 assert.ok(main.includes("后续消息不会再次注入或检索"), "local context must explicitly be admitted only once per model session");
 assert.ok(!main.includes("localPdfSearchTerms"), "later local turns must not run prompt-based document retrieval");
 assert.ok(main.includes("const introduceLocalContext = !prepared.workspaceLinked"), "linked local context must be skipped after its first admission");
@@ -94,4 +100,4 @@ assert.ok(worker.includes('table: { enabled: true'), "worker must enable table i
 assert.ok(worker.includes('formula: { enabled: true'), "worker must enable formula inference");
 assert.ok(worker.includes('markdown: { enabled: true'), "worker must compose Markdown output");
 
-console.log("Paper Composer PDF dual-mode tests passed.");
+console.log("Paper Composer PDF three-mode tests passed.");
