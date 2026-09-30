@@ -47,9 +47,11 @@ assert.ok(main.includes("rememberComposerDirectContextBindings"), "successful so
 assert.ok(main.includes("hasComposerLocalContextBinding"), "linked local documents must track established model-session context");
 assert.ok(main.includes("rememberComposerLocalContextBindings"), "successful local context admission must be persisted");
 assert.ok(main.includes("rememberComposerMineruContextBindings"), "successful MinerU context admission must be persisted");
-assert.ok(main.includes("parsePdfWithMineruV1"), "MinerU mode must use the V1 upload and parse-job API");
+assert.ok(main.includes("parsePdfWithMineruCloud"), "MinerU mode must use the official cloud upload and parse-job API");
 assert.ok(main.includes('getMineruCacheRoot()'), "MinerU must use its own versioned cache root");
-assert.ok(main.includes('mineruSecretName: ""'), "settings may persist only the SecretStorage key name");
+assert.ok(main.includes('MINERU_SECRET_ID = "paper-library-mineru-api-key"'), "MinerU must use one fixed SecretStorage entry");
+assert.ok(main.includes('text.inputEl.type = "password"'), "MinerU must expose one direct password field");
+assert.ok(!main.includes("new SecretComponent"), "MinerU must not expose Obsidian's secondary secret-management picker");
 assert.ok(!main.includes('mineruApiKey: ""'), "the MinerU API key must never be stored in ordinary plugin settings");
 assert.ok(main.includes("后续消息不会再次注入或检索"), "local context must explicitly be admitted only once per model session");
 assert.ok(!main.includes("localPdfSearchTerms"), "later local turns must not run prompt-based document retrieval");

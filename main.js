@@ -28,7 +28,6 @@ const {
   Platform,
   Plugin,
   PluginSettingTab,
-  SecretComponent,
   Setting,
   addIcon,
   requireApiVersion,
@@ -947,7 +946,8 @@ const PAPER_COMPOSER_CHATGPT_FALLBACK_MODEL = "gpt-5.4";
 const PAPER_COMPOSER_CHATGPT_BUNDLED_CODEX_PATH = "/Applications/ChatGPT.app/Contents/Resources/codex";
 const PAPER_COMPOSER_CLI_PROVIDERS = new Set(["kimi"]);
 const MINERU_CACHE_VERSION = 1;
-const MINERU_DEFAULT_API_BASE = "http://127.0.0.1:8000";
+const MINERU_DEFAULT_API_BASE = "https://mineru.net";
+const MINERU_SECRET_ID = "paper-library-mineru-api-key";
 const MINERU_TIERS = new Set(["flash", "basic", "standard", "advanced"]);
 
 function normalizePdfAiMode(value) {
@@ -968,6 +968,13 @@ function normalizeMineruApiBase(value) {
   } catch (_) {
     return MINERU_DEFAULT_API_BASE;
   }
+}
+
+function isOfficialMineruApiBase(value) {
+  try {
+    const hostname = new URL(normalizeMineruApiBase(value)).hostname.toLowerCase();
+    return hostname === "mineru.net" || hostname.endsWith(".mineru.net");
+  } catch (_) { return false; }
 }
 
 function normalizeMineruTier(value) {
@@ -1010,6 +1017,73 @@ function mineruPagesFromStructuredContent(payload = {}) {
       blocks
     };
   });
+}
+
+function mineruStructuredContentFromList(payload = []) {
+  const items = Array.isArray(payload) ? payload : Array.isArray(payload?.items) ? payload.items : [];
+  const pages = new Map();
+  items.forEach((item) => {
+    const pageIndex = Math.max(0, Number(item?.page_idx ?? item?.page_index ?? 0) || 0);
+    const page = pages.get(pageIndex) || { page_idx: pageIndex, blocks: [] };
+    page.blocks.push({
+      type: String(item?.type || item?.category || "text"),
+      content: item?.content ?? item?.text ?? item?.markdown ?? "",
+      captions: item?.captions,
+      footnotes: item?.footnotes
+    });
+    pages.set(pageIndex, page);
+  });
+  return { pages: [...pages.values()].sort((left, right) => left.page_idx - right.page_idx) };
+}
+
+function extractMineruZipEntries(input) {
+  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input || 0);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const minimumEocd = 22;
+  let eocd = -1;
+  for (let offset = Math.max(0, bytes.length - minimumEocd); offset >= Math.max(0, bytes.length - 65557); offset -= 1) {
+    if (view.getUint32(offset, true) === 0x06054b50) { eocd = offset; break; }
+  }
+  if (eocd < 0) throw new Error("MinerU 结果不是有效的 ZIP 文件");
+  const entryCount = view.getUint16(eocd + 10, true);
+  let cursor = view.getUint32(eocd + 16, true);
+  const decoder = new TextDecoder("utf-8");
+  const entries = new Map();
+  let totalOutputBytes = 0;
+  for (let index = 0; index < entryCount; index += 1) {
+    if (cursor + 46 > bytes.length || view.getUint32(cursor, true) !== 0x02014b50) {
+      throw new Error("MinerU ZIP 目录损坏");
+    }
+    const flags = view.getUint16(cursor + 8, true);
+    const method = view.getUint16(cursor + 10, true);
+    const compressedSize = view.getUint32(cursor + 20, true);
+    const uncompressedSize = view.getUint32(cursor + 24, true);
+    const nameLength = view.getUint16(cursor + 28, true);
+    const extraLength = view.getUint16(cursor + 30, true);
+    const commentLength = view.getUint16(cursor + 32, true);
+    const localOffset = view.getUint32(cursor + 42, true);
+    const nameStart = cursor + 46;
+    const name = decoder.decode(bytes.subarray(nameStart, nameStart + nameLength)).replace(/\\/g, "/");
+    cursor = nameStart + nameLength + extraLength + commentLength;
+    if (!name || name.endsWith("/")) continue;
+    if ((flags & 0x1) !== 0) throw new Error("MinerU ZIP 使用了不支持的加密格式");
+    if (localOffset + 30 > bytes.length || view.getUint32(localOffset, true) !== 0x04034b50) {
+      throw new Error("MinerU ZIP 文件项损坏");
+    }
+    const localNameLength = view.getUint16(localOffset + 26, true);
+    const localExtraLength = view.getUint16(localOffset + 28, true);
+    const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
+    const compressed = bytes.subarray(dataOffset, dataOffset + compressedSize);
+    let content;
+    if (method === 0) content = new Uint8Array(compressed);
+    else if (method === 8) content = new Uint8Array(require("node:zlib").inflateRawSync(compressed));
+    else throw new Error(`MinerU ZIP 使用了不支持的压缩方式（${method}）`);
+    if (uncompressedSize && content.byteLength !== uncompressedSize) throw new Error("MinerU ZIP 文件项长度不一致");
+    totalOutputBytes += content.byteLength;
+    if (totalOutputBytes > 256 * 1024 * 1024) throw new Error("MinerU 结果压缩包过大");
+    entries.set(name, content);
+  }
+  return entries;
 }
 
 const DEFAULT_SETTINGS = {
@@ -9296,52 +9370,31 @@ class PaperLibrarySettingTab extends PluginSettingTab {
     if (!containerEl) return;
     containerEl.empty();
     if (this.plugin.getPdfAiMode() !== "mineru") return;
-    new Setting(containerEl)
-      .setName("MinerU V1 服务地址")
-      .setDesc("本机默认地址为 http://127.0.0.1:8000；只填写服务根地址，不要附加 /v1。")
-      .addText((text) => text
-        .setPlaceholder(MINERU_DEFAULT_API_BASE)
-        .setValue(this.plugin.settings.mineruApiBase)
-        .onChange(async (value) => {
-          this.plugin.settings.mineruApiBase = String(value || "").trim();
-          this.plugin.mineruConnectionStatus = null;
-          await this.plugin.saveSettings();
-        }));
-    new Setting(containerEl)
-      .setName("MinerU 解析质量")
-      .setDesc("standard 适合日常论文；advanced 更慢，复杂公式与版面可尝试。")
-      .addDropdown((dropdown) => dropdown
-        .addOption("flash", "Flash")
-        .addOption("basic", "Basic")
-        .addOption("standard", "Standard")
-        .addOption("advanced", "Advanced")
-        .setValue(this.plugin.settings.mineruTier)
-        .onChange(async (value) => {
-          this.plugin.settings.mineruTier = normalizeMineruTier(value);
-          await this.plugin.saveSettings();
-        }));
     const secretSetting = new Setting(containerEl)
       .setName("MinerU API 密钥")
-      .setDesc("本机无鉴权服务可留空；远端密钥通过 Obsidian SecretStorage 保存，普通插件设置中只记录密钥名称。");
-    if (SecretComponent && requireApiVersion?.("1.11.4")) {
-      secretSetting.addComponent((el) => new SecretComponent(this.app, el)
-        .setValue(this.plugin.settings.mineruSecretName || "")
+      .setDesc("用于 MinerU 官方云端 API；只保存在当前 Obsidian 的安全存储中。");
+    if (this.app?.secretStorage?.getSecret && this.app?.secretStorage?.setSecret && requireApiVersion?.("1.11.4")) {
+      secretSetting.addText((text) => {
+        text.inputEl.type = "password";
+        text.inputEl.autocomplete = "off";
+        return text
+        .setPlaceholder("输入 MinerU API Token")
+        .setValue(this.plugin.getMineruStoredApiKey())
         .onChange(async (value) => {
-          this.plugin.settings.mineruSecretName = String(value || "").trim();
-          this.plugin.mineruConnectionStatus = null;
-          await this.plugin.saveSettings();
-        }));
+          await this.plugin.setMineruApiKey(value);
+        });
+      });
     } else {
-      secretSetting.setDesc("当前 Obsidian 版本不支持安全密钥选择；本机无鉴权 MinerU 仍可使用。远端服务请升级到 Obsidian 1.11.4 或更高版本。");
+      secretSetting.setDesc("当前 Obsidian 版本不支持安全密钥存储，请升级到 Obsidian 1.11.4 或更高版本。");
     }
     const connection = new Setting(containerEl)
       .setName("连接测试")
-      .setDesc(this.plugin.mineruConnectionStatus?.message || "验证 /v1/health 与 Markdown、结构化内容输出能力。")
+      .setDesc(this.plugin.mineruConnectionStatus?.message || "验证密钥能否访问 MinerU 官方云端 API，不会创建解析任务。")
       .addButton((button) => button.setButtonText("测试连接").onClick(async () => {
         button.setDisabled(true).setButtonText("正在测试…");
         try {
           await this.plugin.testMineruConnection();
-          new Notice("MinerU V1 服务连接正常");
+          new Notice("MinerU 云端连接正常");
         } catch (error) {
           new Notice(`MinerU 连接失败：${error?.message || error}`);
         } finally {
@@ -10316,6 +10369,14 @@ module.exports = class PaperLibraryPlugin extends Plugin {
         try { await this.ensureNavigationView(false); }
         catch (error) { console.warn("Paper Library: left navigation view unavailable", error); }
         if (!this.isMobileApp()) {
+          // Keep both Paper Library utility tabs present in the same native
+          // right-sidebar group. They used to be created only after a click,
+          // so a plugin reload or restored layout could make either icon
+          // disappear until the user found the command again.
+          try { await this.ensureDetailView(false); }
+          catch (error) { console.warn("Paper Library: detail sidebar unavailable", error); }
+          try { await this.ensurePaperComposerView(false); }
+          catch (error) { console.warn("Paper Library: Composer sidebar unavailable", error); }
           try { await this.migratePortablePdfFigureCatalogs(); }
           catch (error) { console.warn("Paper Library: portable figure catalog migration unavailable", error); }
         }
@@ -10880,7 +10941,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     }
   }
 
-  async activateIsolatedPaperComposerView(runtime = this.claudianRuntime) {
+  async ensurePaperComposerView(reveal = false, runtime = this.claudianRuntime) {
     const workspace = this.app.workspace;
     let leaf = workspace.getLeavesOfType?.(CLAUDIAN_VIEW_TYPE)?.[0] || null;
     if (!leaf) {
@@ -10889,11 +10950,16 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       // opens appear as a pane at the bottom of the right sidebar.
       leaf = workspace.getRightLeaf?.(false) || workspace.getLeaf?.("tab") || null;
       if (!leaf) throw new Error("无法创建独立的 Paper Composer 侧栏");
-      await leaf.setViewState({ type: CLAUDIAN_VIEW_TYPE, active: true });
+      await leaf.setViewState({ type: CLAUDIAN_VIEW_TYPE, active: reveal });
     }
-    workspace.revealLeaf?.(leaf);
+    if (reveal) workspace.revealLeaf?.(leaf);
     this.refreshPaperComposerLeafIcon(leaf);
     window.setTimeout(() => this.refreshPaperComposerLeafIcon(leaf), 0);
+    return leaf;
+  }
+
+  async activateIsolatedPaperComposerView(runtime = this.claudianRuntime) {
+    const leaf = await this.ensurePaperComposerView(true, runtime);
     const view = leaf.view || runtime?.getView?.();
     view?.focusActiveInput?.();
     return leaf;
@@ -13209,19 +13275,39 @@ module.exports = class PaperLibraryPlugin extends Plugin {
   }
 
   getMineruApiBase() {
-    return normalizeMineruApiBase(this.settings?.mineruApiBase);
+    return MINERU_DEFAULT_API_BASE;
   }
 
   getMineruCacheRoot() {
     return normalizePath(`${this.manifest.dir || `.obsidian/plugins/${this.manifest.id}`}/mineru-cache/v${MINERU_CACHE_VERSION}`);
   }
 
-  async getMineruApiKey() {
-    const name = String(this.settings?.mineruSecretName || "").trim();
-    if (!name || !this.app?.secretStorage?.getSecret) return "";
-    try { return String(await this.app.secretStorage.getSecret(name) || "").trim(); }
-    catch (error) {
+  getMineruStoredApiKey() {
+    if (!this.app?.secretStorage?.getSecret) return "";
+    try {
+      const stored = String(this.app.secretStorage.getSecret(MINERU_SECRET_ID) || "").trim();
+      if (stored) return stored;
+      const legacyName = String(this.settings?.mineruSecretName || "").trim();
+      return legacyName ? String(this.app.secretStorage.getSecret(legacyName) || "").trim() : "";
+    } catch (error) {
       throw new Error(`无法读取 MinerU 安全密钥：${error?.message || error}`);
+    }
+  }
+
+  async getMineruApiKey() {
+    return this.getMineruStoredApiKey();
+  }
+
+  async setMineruApiKey(value) {
+    if (!this.app?.secretStorage?.setSecret) throw new Error("当前 Obsidian 不支持安全密钥存储");
+    try {
+      this.app.secretStorage.setSecret(MINERU_SECRET_ID, String(value || "").trim());
+      this.settings.mineruSecretName = "";
+      this.settings.mineruApiBase = MINERU_DEFAULT_API_BASE;
+      this.mineruConnectionStatus = null;
+      await this.saveSettings();
+    } catch (error) {
+      throw new Error(`无法保存 MinerU 安全密钥：${error?.message || error}`);
     }
   }
 
@@ -13263,13 +13349,18 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       const token = await this.getMineruApiKey();
       if (token) headers.Authorization = `Bearer ${token}`;
     }
-    const response = await requestUrl({
-      url,
-      method: options.method || "GET",
-      headers,
-      body: options.body,
-      throw: false
-    });
+    let response;
+    try {
+      response = await requestUrl({
+        url,
+        method: options.method || "GET",
+        headers,
+        body: options.body,
+        throw: false
+      });
+    } catch (error) {
+      throw new Error(`无法连接 MinerU 服务：${error?.message || error}`);
+    }
     if (response.status < 200 || response.status >= 300) {
       let detail = "";
       try {
@@ -13283,19 +13374,28 @@ module.exports = class PaperLibraryPlugin extends Plugin {
 
   async testMineruConnection() {
     try {
-      const response = await this.mineruRequest("health");
-      const payload = this.mineruResponseJson(response, "MinerU 健康检查");
-      // /health may be public even when parse jobs require a key. Exercise one
-      // authenticated read so the settings test catches a missing/invalid key.
-      await this.mineruRequest("parse/jobs?limit=1");
-      const formats = payload?.features?.output_formats || payload?.output_formats || [];
-      if (Array.isArray(formats) && formats.length
-        && !(formats.includes("markdown") && formats.includes("structured_content"))) {
-        throw new Error("该服务未声明 Markdown 与 structured_content 输出能力");
+      const token = await this.getMineruApiKey();
+      if (!token) throw new Error("请先填写 MinerU API 密钥");
+      const response = await requestUrl({
+        url: `${MINERU_DEFAULT_API_BASE}/api/v4/extract/task/paper-library-connection-test`,
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        throw: false
+      });
+      const payload = this.mineruResponseJson(response, "MinerU 云端连接测试");
+      const code = String(payload?.code ?? "");
+      const message = String(payload?.msg || payload?.message || "");
+      const tokenRejected = response.status === 401 || response.status === 403
+        || ["A0202", "A0211"].includes(code);
+      const authenticated = response.status >= 200 && response.status < 300
+        && !tokenRejected
+        && (code === "0" || code === "-60012" || /task not found|任务.*不存在|过期/i.test(message));
+      if (!authenticated) {
+        throw new Error(tokenRejected ? "密钥无效或已过期" : `云端返回异常${message ? `：${message}` : `（HTTP ${response.status}）`}`);
       }
       this.mineruConnectionStatus = {
         ok: true,
-        message: `连接正常 · ${payload?.version ? `MinerU ${payload.version}` : this.getMineruApiBase()}`
+        message: "连接正常 · MinerU 官方云端"
       };
       return payload;
     } catch (error) {
@@ -13355,6 +13455,198 @@ module.exports = class PaperLibraryPlugin extends Plugin {
   mineruOutputFileId(outputFiles, key) {
     const value = outputFiles?.[key];
     return String(typeof value === "string" ? value : value?.file_id || value?.id || "");
+  }
+
+  async mineruCloudRequest(pathOrUrl, options = {}) {
+    const url = /^https?:\/\//i.test(pathOrUrl)
+      ? pathOrUrl
+      : `${MINERU_DEFAULT_API_BASE}/${String(pathOrUrl || "").replace(/^\/+/, "")}`;
+    const headers = { ...(options.headers || {}) };
+    if (options.authorize !== false) {
+      const token = await this.getMineruApiKey();
+      if (!token) throw new Error("请先在设置中填写 MinerU API 密钥");
+      headers.Authorization = `Bearer ${token}`;
+    }
+    let response;
+    try {
+      response = await requestUrl({
+        url,
+        method: options.method || "GET",
+        headers,
+        body: options.body,
+        throw: false
+      });
+    } catch (error) {
+      throw new Error(`无法连接 MinerU 云端：${error?.message || error}`);
+    }
+    if (response.status < 200 || response.status >= 300) {
+      let detail = "";
+      try {
+        const payload = this.mineruResponseJson(response);
+        detail = String(payload?.msg || payload?.message || payload?.error || "");
+      } catch (_) { detail = String(response?.text || "").slice(0, 240); }
+      throw new Error(`MinerU 云端请求失败（HTTP ${response.status}）${detail ? `：${detail}` : ""}`);
+    }
+    return response;
+  }
+
+  mineruCloudPayload(response, label = "MinerU 云端") {
+    const payload = this.mineruResponseJson(response, label);
+    const code = String(payload?.code ?? "0");
+    if (code !== "0") {
+      const message = String(payload?.msg || payload?.message || "未知错误");
+      if (["A0202", "A0211"].includes(code)) throw new Error("MinerU API 密钥无效或已过期");
+      throw new Error(`${label}失败：${message}（${code}）`);
+    }
+    return payload?.data || {};
+  }
+
+  async parsePdfWithMineruCloud(buffer, options = {}) {
+    const bytes = buffer instanceof ArrayBuffer
+      ? buffer
+      : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    const sourceHash = await this.sha256ArrayBuffer(bytes);
+    const apiBase = MINERU_DEFAULT_API_BASE;
+    const modelVersion = "vlm";
+    const cacheDescriptor = JSON.stringify({
+      version: MINERU_CACHE_VERSION,
+      sourceHash,
+      apiBase,
+      protocol: "cloud-v4",
+      modelVersion
+    });
+    const cacheKey = await this.sha256ArrayBuffer(new TextEncoder().encode(cacheDescriptor));
+    const cached = await this.readMineruCache(cacheKey);
+    const buildSession = (documentMarkdown, structured, metadata = {}, cacheHit = false) => {
+      const pages = mineruPagesFromStructuredContent(structured);
+      if (!pages.length && String(documentMarkdown || "").trim()) {
+        pages.push({ page: 1, text: String(documentMarkdown).trim(), blocks: [] });
+      }
+      return {
+        version: 1,
+        engine: "mineru-cloud-v4",
+        provider: "mineru",
+        tier: modelVersion,
+        parserVersion: "cloud-v4",
+        name: options.name || metadata.sourceName || "document.pdf",
+        path: options.path || metadata.sourcePath || "",
+        totalPages: pages.length,
+        processedPages: pages.length,
+        truncated: false,
+        characterCount: pages.reduce((sum, page) => sum + page.text.length, 0),
+        pages,
+        cacheKey,
+        cacheHit,
+        documentMarkdown: String(documentMarkdown || "")
+      };
+    };
+    if (cached) return buildSession(cached.documentMarkdown, cached.structured, cached.metadata, true);
+
+    const task = { cancelled: false, batchId: "" };
+    this.mineruActiveTasks ??= new Set();
+    this.mineruActiveTasks.add(task);
+    const cancelled = () => Boolean(task.cancelled || options.cancelToken?.cancelled);
+    const ensureActive = () => {
+      if (cancelled()) throw new Error("MinerU 解析已取消");
+    };
+    const jsonRequest = async (path, method, body) => {
+      const response = await this.mineruCloudRequest(path, {
+        method,
+        headers: body === undefined ? {} : { "Content-Type": "application/json", Accept: "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body)
+      });
+      return this.mineruCloudPayload(response);
+    };
+    try {
+      ensureActive();
+      const filename = String(options.name || "document.pdf").replace(/[\\/]/g, "_") || "document.pdf";
+      options.onProgress?.({ stage: "MinerU 云端创建任务", percent: 3 });
+      const created = await jsonRequest("api/v4/file-urls/batch", "POST", {
+        files: [{ name: filename, data_id: sourceHash.slice(0, 64) }],
+        model_version: modelVersion,
+        enable_formula: true,
+        enable_table: true,
+        language: "ch"
+      });
+      task.batchId = String(created?.batch_id || "");
+      const uploadUrl = String(Array.isArray(created?.file_urls) ? created.file_urls[0] : "");
+      if (!task.batchId || !uploadUrl) throw new Error("MinerU 云端没有返回有效的上传任务");
+
+      ensureActive();
+      options.onProgress?.({ stage: "上传到 MinerU 云端", percent: 12 });
+      await this.mineruCloudRequest(uploadUrl, {
+        method: "PUT",
+        headers: {},
+        body: bytes,
+        authorize: false
+      });
+
+      const maxPolls = Math.max(1, Number(options.maxPolls) || 200);
+      const pollIntervalMs = Math.max(0, Number(options.pollIntervalMs ?? 3000));
+      let result = null;
+      for (let poll = 0; poll < maxPolls; poll += 1) {
+        ensureActive();
+        if (pollIntervalMs) await new Promise((resolve) => globalThis.setTimeout(resolve, pollIntervalMs));
+        const polled = await jsonRequest(`api/v4/extract-results/batch/${encodeURIComponent(task.batchId)}`, "GET");
+        const results = Array.isArray(polled?.extract_result) ? polled.extract_result : [];
+        result = results.find((item) => item?.data_id === sourceHash.slice(0, 64))
+          || results.find((item) => item?.file_name === filename)
+          || results[0]
+          || null;
+        const state = String(result?.state || "pending").toLowerCase();
+        const progress = result?.extract_progress || {};
+        const extracted = Number(progress.extracted_pages) || 0;
+        const total = Number(progress.total_pages) || 0;
+        options.onProgress?.({
+          stage: state === "running" ? "MinerU 云端正在解析" : "等待 MinerU 云端",
+          percent: total > 0 ? Math.min(88, 20 + Math.round((extracted / total) * 68)) : Math.min(88, 22 + poll * 2)
+        });
+        if (["done", "failed"].includes(state)) break;
+      }
+      ensureActive();
+      const state = String(result?.state || "").toLowerCase();
+      if (state !== "done") {
+        const detail = String(result?.err_msg || "");
+        if (!state || ["waiting-file", "pending", "running", "converting"].includes(state)) {
+          throw new Error("MinerU 云端解析等待超时");
+        }
+        throw new Error(`MinerU 云端解析失败${detail ? `：${detail}` : ""}`);
+      }
+      const zipUrl = String(result?.full_zip_url || "");
+      if (!zipUrl) throw new Error("MinerU 云端任务完成，但没有返回结果压缩包");
+      options.onProgress?.({ stage: "下载 MinerU 结果", percent: 92 });
+      const zipResponse = await this.mineruCloudRequest(zipUrl, { authorize: false });
+      const zipBuffer = zipResponse?.arrayBuffer;
+      if (!(zipBuffer instanceof ArrayBuffer) || !zipBuffer.byteLength) throw new Error("MinerU 结果压缩包为空");
+      const entries = extractMineruZipEntries(zipBuffer);
+      const findEntry = (matcher) => [...entries.entries()].find(([name]) => matcher(name))?.[1] || null;
+      const markdownBytes = findEntry((name) => /(^|\/)full\.md$/i.test(name));
+      if (!markdownBytes) throw new Error("MinerU 结果压缩包中缺少 full.md");
+      const decoder = new TextDecoder("utf-8");
+      const documentMarkdown = decoder.decode(markdownBytes);
+      const contentBytes = findEntry((name) => /(^|\/)(?:[^/]+_)?content_list\.json$/i.test(name));
+      let structured = {};
+      if (contentBytes) {
+        try { structured = mineruStructuredContentFromList(JSON.parse(decoder.decode(contentBytes))); }
+        catch (error) { console.warn("Paper Library: MinerU content_list could not be parsed", error); }
+      }
+      options.onProgress?.({ stage: "保存 MinerU 缓存", percent: 97 });
+      const metadata = {
+        version: MINERU_CACHE_VERSION,
+        cacheKey,
+        sourceHash,
+        sourceName: filename,
+        sourcePath: options.path || "",
+        apiBase,
+        protocol: "cloud-v4",
+        modelVersion,
+        createdAt: new Date().toISOString()
+      };
+      await this.writeMineruCache(cacheKey, { documentMarkdown, structured, metadata });
+      return buildSession(documentMarkdown, structured, metadata, false);
+    } finally {
+      this.mineruActiveTasks.delete(task);
+    }
   }
 
   async parsePdfWithMineruV1(buffer, options = {}) {
@@ -14077,7 +14369,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       return { ...base, detail: `原始 PDF · ${formatAIFileSize(byteLength)}`, pdfData: arrayBufferToBase64(bytes), pdfMode: "direct" };
     }
     if (mode === "mineru") {
-      const session = await this.parsePdfWithMineruV1(bytes, options);
+      const session = await this.parsePdfWithMineruCloud(bytes, options);
       return {
         ...base,
         detail: `MinerU 全文 · ${session.processedPages} 页 · ${session.characterCount} 字符`,
@@ -14457,7 +14749,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     this.settings.aiLocalPdfMaxPages = Math.min(2000, Math.max(10, Number(stored?.aiLocalPdfMaxPages) || DEFAULT_SETTINGS.aiLocalPdfMaxPages));
     this.settings.aiLocalContextCharacters = Math.min(300000, Math.max(12000,
       Number(stored?.aiLocalContextCharacters) || DEFAULT_SETTINGS.aiLocalContextCharacters));
-    this.settings.mineruApiBase = normalizeMineruApiBase(stored?.mineruApiBase);
+    this.settings.mineruApiBase = MINERU_DEFAULT_API_BASE;
     this.settings.mineruTier = normalizeMineruTier(stored?.mineruTier);
     this.settings.mineruSecretName = String(stored?.mineruSecretName || "").trim();
     this.settings.paperComposerPdfMessageCards = stored?.paperComposerPdfMessageCards
@@ -14880,7 +15172,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     normalized.appearanceProtocolVersion = APPEARANCE_PROTOCOL_VERSION;
     normalized.doubleClickOpenMode = normalizeDoubleClickOpenMode(normalized.doubleClickOpenMode);
     normalized.pdfAiMode = normalizePdfAiMode(normalized.pdfAiMode);
-    normalized.mineruApiBase = normalizeMineruApiBase(normalized.mineruApiBase);
+    normalized.mineruApiBase = MINERU_DEFAULT_API_BASE;
     normalized.mineruTier = normalizeMineruTier(normalized.mineruTier);
     normalized.mineruSecretName = String(normalized.mineruSecretName || "").trim();
     normalized.papers = Array.isArray(normalized.papers) ? normalized.papers : [];
@@ -23865,10 +24157,14 @@ module.exports = class PaperLibraryPlugin extends Plugin {
 module.exports.mineruInternals = {
   MINERU_CACHE_VERSION,
   MINERU_DEFAULT_API_BASE,
+  MINERU_SECRET_ID,
   normalizePdfAiMode,
   normalizeMineruApiBase,
   normalizeMineruTier,
+  isOfficialMineruApiBase,
   mineruSameOrigin,
   resolveMineruUploadUrl,
-  mineruPagesFromStructuredContent
+  mineruPagesFromStructuredContent,
+  mineruStructuredContentFromList,
+  extractMineruZipEntries
 };

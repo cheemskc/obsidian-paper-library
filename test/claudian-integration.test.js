@@ -95,9 +95,11 @@ assert.ok(main.includes('previousOptionsVersion < 1 || !settings.settingsProvide
 assert.ok(main.includes('settings.lastSelectedChatModel = { providerId: "codex", model: chatGptSelection }'), "the ChatGPT default must reach new conversations");
 assert.ok(main.includes('paperComposerModelOptionsVersion: 0'), "model defaults must use an explicit one-time migration marker");
 assert.ok(main.includes("activateIsolatedPaperComposerView"), "Paper Composer activation must own a dedicated view leaf");
-const composerActivation = main.slice(main.indexOf("async activateIsolatedPaperComposerView"), main.indexOf("async addFileToPaperComposer"));
+const composerActivation = main.slice(main.indexOf("async ensurePaperComposerView"), main.indexOf("async addFileToPaperComposer"));
 assert.ok(composerActivation.includes("workspace.getRightLeaf?.(false)"), "Paper Composer must open as a tab in the existing right-sidebar group");
 assert.ok(!composerActivation.includes("workspace.getRightLeaf?.(true)"), "Paper Composer must not create a bottom split in the right sidebar");
+assert.ok(main.includes("await this.ensurePaperComposerView(false)"), "layout restore must keep the Composer right-sidebar icon present");
+assert.ok(main.includes("await this.ensureDetailView(false)"), "layout restore must keep the paper details right-sidebar icon present");
 assert.ok(main.includes("installPaperComposerWorkspaceBridge"), "Paper Composer must own its Markdown-link lifecycle");
 assert.ok(main.includes("syncPaperComposerLinkedMarkdown"), "Markdown file opens must be routed to Paper Composer independently");
 assert.ok(main.includes("syncPaperComposerLinkedPdf"), "document file opens must update Paper Composer attachments");
