@@ -301,20 +301,21 @@ const STANDARD_LIBRARY_COLUMN_ORDER = [
   "rankings", "notes", "tags", "doi", "attachment", "favorite"
 ];
 const DEFAULT_STANDARD_LIBRARY_COLUMNS = ["type", "title", "authors", "venue", "year", "notes"];
+const DOUBLE_CLICK_OPEN_MODES = new Set(["workspace", "pdf", "note"]);
 const STANDARD_LIBRARY_COLUMN_META = {
-  type: { label: "Type", menuLabel: "类型", width: 54 },
-  title: { label: "Title", menuLabel: "标题", width: 360, required: true },
-  authors: { label: "Contributor", menuLabel: "作者", width: 210 },
-  institution: { label: "Institution", menuLabel: "机构", width: 190 },
-  venue: { label: "Source", menuLabel: "来源", width: 180 },
-  year: { label: "Year", menuLabel: "年份", width: 72 },
-  rating: { label: "Rating", menuLabel: "评分", width: 104 },
-  rankings: { label: "Rank", menuLabel: "分区 / 等级", width: 220 },
-  notes: { label: "Notes", menuLabel: "笔记", width: 64 },
-  tags: { label: "Tags", menuLabel: "标签", width: 180 },
-  doi: { label: "DOI", menuLabel: "DOI", width: 190 },
-  attachment: { label: "File", menuLabel: "附件", width: 52 },
-  favorite: { label: "Star", menuLabel: "收藏", width: 52 }
+  type: { label: "Type", menuLabel: "类型", width: 54, min: 44, max: 96 },
+  title: { label: "Title", menuLabel: "标题", width: 360, min: 220, max: 1200, required: true },
+  authors: { label: "Contributor", menuLabel: "作者", width: 210, min: 120, max: 600 },
+  institution: { label: "Institution", menuLabel: "机构", width: 190, min: 120, max: 600 },
+  venue: { label: "Source", menuLabel: "来源", width: 180, min: 120, max: 600 },
+  year: { label: "Year", menuLabel: "年份", width: 72, min: 64, max: 140 },
+  rating: { label: "Rating", menuLabel: "评分", width: 104, min: 88, max: 150 },
+  rankings: { label: "Rank", menuLabel: "分区 / 等级", width: 220, min: 140, max: 640 },
+  notes: { label: "Notes", menuLabel: "笔记", width: 64, min: 56, max: 120 },
+  tags: { label: "Tags", menuLabel: "标签", width: 180, min: 120, max: 500 },
+  doi: { label: "DOI", menuLabel: "DOI", width: 190, min: 140, max: 420 },
+  attachment: { label: "File", menuLabel: "附件", width: 52, min: 44, max: 96 },
+  favorite: { label: "Star", menuLabel: "收藏", width: 52, min: 44, max: 96 }
 };
 const FAVORITE_COLORS = [
   { id: "yellow", label: "黄色", value: "#f4c84b" },
@@ -330,6 +331,11 @@ const FAVORITE_COLORS = [
 function normalizeFavoriteColor(value) {
   const id = String(value || "").toLocaleLowerCase();
   return FAVORITE_COLORS.some((color) => color.id === id) ? id : "yellow";
+}
+
+function normalizeDoubleClickOpenMode(value) {
+  const mode = String(value || "").trim().toLocaleLowerCase();
+  return DOUBLE_CLICK_OPEN_MODES.has(mode) ? mode : "workspace";
 }
 
 function favoriteColorValue(value) {
@@ -965,6 +971,8 @@ const DEFAULT_SETTINGS = {
   tableColumnWidths: Object.fromEntries(Object.entries(PAPER_TABLE_COLUMNS).map(([key, value]) => [key, value.width])),
   tableColumnOrder: [...DEFAULT_PAPER_TABLE_COLUMN_ORDER],
   standardTableColumns: [...DEFAULT_STANDARD_LIBRARY_COLUMNS],
+  standardTableColumnWidths: {},
+  doubleClickOpenMode: "workspace",
   jcrRankCache: {},
   jcrRankCacheVersion: "showjcr-jcr2025-if",
   conferenceRateCache: {},
@@ -3155,6 +3163,7 @@ class PaperLibraryView extends ItemView {
   renderMain(main) {
     const appearanceBase = this.plugin.getLibraryAppearanceBase();
     const appearance = this.plugin.getLibraryAppearanceDefinition();
+    const standardDesktop = this.plugin.getLibraryAppearanceId() === "standard" && !this.plugin.isMobileApp();
     this.installPdfDropTarget(main);
     if (this.scope === "daily") {
       this.tableHost = null;
@@ -3178,36 +3187,38 @@ class PaperLibraryView extends ItemView {
     if (appearanceBase === "paperglass" && !this.plugin.isMobileApp()) {
       this.renderPaperglassToolbarControls(toolbar);
     }
-    const viewToggle = iconButton(
-      toolbar,
-      "palette",
-      `选择外观（当前：${this.plugin.getLibraryAppearanceName()}）`,
-      (event) => this.plugin.showLibraryAppearanceMenu(event),
-      "paperlib-view-style-toggle"
-    );
-    viewToggle.toggleClass("is-active", this.plugin.getLibraryAppearanceId() !== "standard");
-    const selectToggle = iconButton(toolbar, "list-checks",
-      this.selectionActive ? "退出多选" : "多选论文",
-      () => this.setSelectionMode(!this.selectionActive),
-      "paperlib-select-toggle");
-    selectToggle.toggleClass("is-active", this.selectionActive);
-    if (this.plugin.isMobileApp()) this.renderMobileToolbarActions(toolbar);
-    else {
-      const detailToggle = iconButton(
+    if (!standardDesktop) {
+      const viewToggle = iconButton(
         toolbar,
-        "info",
-        "打开论文详情",
-        () => this.plugin.ensureDetailView(true),
-        "paperlib-detail-toggle"
+        "palette",
+        `选择外观（当前：${this.plugin.getLibraryAppearanceName()}）`,
+        (event) => this.plugin.showLibraryAppearanceMenu(event),
+        "paperlib-view-style-toggle"
       );
-      detailToggle.disabled = !this.selectedId;
-      iconButton(
-        toolbar,
-        PAPER_COMPOSER_ICON,
-        "打开 Paper Composer（AI）",
-        () => this.plugin.openSmartComposer(),
-        "paperlib-composer-toggle"
-      );
+      viewToggle.toggleClass("is-active", this.plugin.getLibraryAppearanceId() !== "standard");
+      const selectToggle = iconButton(toolbar, "list-checks",
+        this.selectionActive ? "退出多选" : "多选论文",
+        () => this.setSelectionMode(!this.selectionActive),
+        "paperlib-select-toggle");
+      selectToggle.toggleClass("is-active", this.selectionActive);
+      if (this.plugin.isMobileApp()) this.renderMobileToolbarActions(toolbar);
+      else {
+        const detailToggle = iconButton(
+          toolbar,
+          "info",
+          "打开论文详情",
+          () => this.plugin.ensureDetailView(true),
+          "paperlib-detail-toggle"
+        );
+        detailToggle.disabled = !this.selectedId;
+        iconButton(
+          toolbar,
+          PAPER_COMPOSER_ICON,
+          "打开 Paper Composer（AI）",
+          () => this.plugin.openSmartComposer(),
+          "paperlib-composer-toggle"
+        );
+      }
     }
     const severanceMasthead = main.createDiv({ cls: "paperlib-severance-masthead" });
     const severanceMark = severanceMasthead.createDiv({ cls: "paperlib-severance-mark", attr: { "aria-hidden": "true" } });
@@ -3284,6 +3295,53 @@ class PaperLibraryView extends ItemView {
       [this.sortKey, this.sortDirection] = sortSelect.value.split(":");
       this.renderTable();
     });
+
+    iconButton(
+      actions,
+      "ellipsis",
+      "更多论文库操作",
+      (event) => this.showStandardLibraryActionsMenu(event),
+      "paperlib-standard-utility-menu"
+    );
+  }
+
+  showStandardLibraryActionsMenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const menu = new Menu();
+    const activeAppearance = this.plugin.getLibraryAppearanceId();
+    menu.addItem((item) => {
+      item.setTitle(`外观：${this.plugin.getLibraryAppearanceName()}`).setIcon("palette");
+      const submenu = item.setSubmenu();
+      ["standard", "gallery", "paperglass"].forEach((id) => submenu.addItem((child) => child
+        .setTitle(this.plugin.getLibraryAppearanceName(id))
+        .setIcon(activeAppearance === id ? "check" : id === "gallery" ? "layout-dashboard" : id === "paperglass" ? "layout-grid" : "table-2")
+        .onClick(() => void this.plugin.setLibraryAppearance(id))));
+      const customProfiles = this.plugin.getCustomAppearanceProfiles();
+      if (customProfiles.length) {
+        submenu.addSeparator();
+        customProfiles.forEach((profile) => submenu.addItem((child) => child
+          .setTitle(profile.name)
+          .setIcon(activeAppearance === "custom" && this.plugin.getActiveCustomAppearanceId() === profile.id ? "check" : "paintbrush")
+          .onClick(() => void this.plugin.setLibraryAppearance(`custom:${profile.id}`))));
+      }
+    });
+    menu.addItem((item) => item
+      .setTitle(this.selectionActive ? "退出多选" : "多选论文")
+      .setIcon("list-checks")
+      .setChecked(this.selectionActive)
+      .onClick(() => this.setSelectionMode(!this.selectionActive)));
+    menu.addSeparator();
+    menu.addItem((item) => item
+      .setTitle("打开论文详情")
+      .setIcon("info")
+      .setDisabled(!this.selectedId)
+      .onClick(() => this.plugin.ensureDetailView(true)));
+    menu.addItem((item) => item
+      .setTitle("打开 Paper Composer（AI）")
+      .setIcon(PAPER_COMPOSER_ICON)
+      .onClick(() => this.plugin.openSmartComposer()));
+    menu.showAtMouseEvent(event);
   }
 
   dailyDateKey(value) {
@@ -3539,7 +3597,7 @@ class PaperLibraryView extends ItemView {
     });
     card.addEventListener("dblclick", (event) => {
       event.preventDefault();
-      void this.plugin.openPaperPdf(paper, { native: this.plugin.isMobileApp() });
+      void this.plugin.openPaperFromDoubleClick(paper);
     });
   }
 
@@ -4090,7 +4148,7 @@ class PaperLibraryView extends ItemView {
       columnOrder.forEach((key) => {
         if (standardCatalog) {
           const meta = STANDARD_LIBRARY_COLUMN_META[key] || { label: key };
-          this.createStandardSortHeader(header, key, meta.label);
+          this.createStandardSortHeader(header, key, meta.label, table, columnOrder);
         } else {
           const meta = PAPER_TABLE_COLUMN_META[key] || { label: key };
           this.createSortHeader(header, key, meta.label, table, meta.icon || "");
@@ -4181,7 +4239,7 @@ class PaperLibraryView extends ItemView {
           void this.plugin.saveSettings().catch((error) => (
             console.warn("Paper Library: opened-paper timestamp save unavailable", error)
           ));
-          void this.plugin.openPaperPdf(paper, { native: true });
+          void this.plugin.openPaperFromDoubleClick(paper);
           return;
         }
         if (mobile) {
@@ -4220,7 +4278,7 @@ class PaperLibraryView extends ItemView {
         void this.plugin.saveSettings().catch((error) => (
           console.warn("Paper Library: opened-paper timestamp save unavailable", error)
         ));
-        await this.plugin.openPaperPdf(paper, { native: this.plugin.isMobileApp() });
+        await this.plugin.openPaperFromDoubleClick(paper);
       });
       row.addEventListener("contextmenu", (event) => this.showPaperContextMenu(event, paper));
       if (!this.plugin.isMobileApp()) {
@@ -4264,11 +4322,17 @@ class PaperLibraryView extends ItemView {
     return this.plugin.normalizeStandardTableColumns(this.plugin.settings.standardTableColumns);
   }
 
-  applyStandardTableColumnWidths(table, columnOrder) {
-    const widths = Object.fromEntries(columnOrder.map((key) => [key, STANDARD_LIBRARY_COLUMN_META[key]?.width || 120]));
+  applyStandardTableColumnWidths(table, columnOrder, widthOverrides = null) {
+    const savedWidths = this.plugin.normalizeStandardTableColumnWidths(
+      widthOverrides || this.plugin.settings.standardTableColumnWidths
+    );
+    const widths = Object.fromEntries(columnOrder.map((key) => [
+      key,
+      savedWidths[key] || STANDARD_LIBRARY_COLUMN_META[key]?.width || 120
+    ]));
     const available = Math.max(0, Number(this.tableHost?.clientWidth) || 0);
     const baseTotal = columnOrder.reduce((sum, key) => sum + widths[key], 0);
-    if (available > baseTotal) widths.title += available - baseTotal;
+    if (!Object.keys(savedWidths).length && available > baseTotal) widths.title += available - baseTotal;
     columnOrder.forEach((key) => {
       table.style.setProperty(`--paperlib-column-${key}`, `${widths[key]}px`);
     });
@@ -4280,6 +4344,7 @@ class PaperLibraryView extends ItemView {
       "--paperlib-table-width",
       `${columnOrder.reduce((sum, key) => sum + widths[key], 0)}px`
     );
+    this.currentStandardTableColumnWidths = widths;
   }
 
   getStandardPaperNoteCount(paper) {
@@ -4318,13 +4383,6 @@ class PaperLibraryView extends ItemView {
     if (key === "title") {
       const title = row.createSpan({ cls: "paperlib-cell paperlib-title" });
       title.createSpan({ cls: "paperlib-title-text", text: paper.title });
-      if (paper.pdfPath) {
-        const attachment = title.createSpan({
-          cls: "paperlib-standard-attachment",
-          attr: { "aria-label": "PDF attached", title: "PDF attached" }
-        });
-        setPaperlibIcon(attachment, "paperclip");
-      }
       return;
     }
     if (key === "authors") {
@@ -4869,6 +4927,145 @@ class PaperLibraryView extends ItemView {
     });
   }
 
+  async saveStandardTableColumnWidths(widths) {
+    this.plugin.settings.standardTableColumnWidths = this.plugin.normalizeStandardTableColumnWidths(widths);
+    await this.plugin.saveSettings();
+  }
+
+  async saveStandardTableColumnOrder(order) {
+    this.plugin.settings.standardTableColumns = this.plugin.normalizeStandardTableColumns(order);
+    await this.plugin.saveSettings();
+  }
+
+  installStandardColumnReorder(cell, key) {
+    cell.draggable = true;
+    cell.addEventListener("dragstart", (event) => {
+      if (event.target?.closest?.(".paperlib-column-resizer")) {
+        event.preventDefault();
+        return;
+      }
+      this.draggedStandardTableColumn = key;
+      cell.addClass("is-dragging");
+      event.dataTransfer?.setData("text/x-paperlib-standard-column", key);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    });
+    cell.addEventListener("dragover", (event) => {
+      const source = this.draggedStandardTableColumn
+        || event.dataTransfer?.getData("text/x-paperlib-standard-column");
+      if (!source || source === key) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      const rect = cell.getBoundingClientRect();
+      const after = event.clientX > rect.left + rect.width / 2;
+      this.clearColumnDropIndicators(cell.parentElement);
+      cell.addClass(after ? "is-drop-after" : "is-drop-before");
+    });
+    cell.addEventListener("drop", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const source = this.draggedStandardTableColumn
+        || event.dataTransfer?.getData("text/x-paperlib-standard-column");
+      if (!source || source === key) return;
+      const rect = cell.getBoundingClientRect();
+      const after = event.clientX > rect.left + rect.width / 2;
+      const order = this.getStandardTableColumnOrder().filter((column) => column !== source);
+      let targetIndex = order.indexOf(key);
+      if (targetIndex < 0) return;
+      if (after) targetIndex += 1;
+      order.splice(targetIndex, 0, source);
+      this.columnDragFinishedAt = Date.now();
+      this.draggedStandardTableColumn = "";
+      this.clearColumnDropIndicators(cell.parentElement);
+      void this.saveStandardTableColumnOrder(order).then(() => this.renderTable());
+    });
+    cell.addEventListener("dragend", () => {
+      this.columnDragFinishedAt = Date.now();
+      this.draggedStandardTableColumn = "";
+      this.clearColumnDropIndicators(cell.parentElement);
+    });
+  }
+
+  installStandardColumnResizer(cell, key, label, table, columnOrder) {
+    const config = STANDARD_LIBRARY_COLUMN_META[key];
+    if (!config) return;
+    const handle = cell.createSpan({
+      cls: "paperlib-column-resizer paperlib-standard-column-resizer",
+      attr: {
+        role: "separator",
+        tabindex: "0",
+        "aria-orientation": "vertical",
+        "aria-label": `调整 ${config.menuLabel || label} 列宽`,
+        "aria-valuemin": String(config.min),
+        "aria-valuemax": String(config.max),
+        "aria-valuenow": String(this.currentStandardTableColumnWidths?.[key] || config.width),
+        title: `拖动调整 ${config.menuLabel || label} 宽度；双击重置此列`
+      }
+    });
+    handle.draggable = false;
+    const getWorkingWidths = () => ({
+      ...this.plugin.normalizeStandardTableColumnWidths(this.plugin.settings.standardTableColumnWidths),
+      ...(this.currentStandardTableColumnWidths || {})
+    });
+    const commitWidth = (width) => {
+      const widths = { ...getWorkingWidths(), [key]: width };
+      this.applyStandardTableColumnWidths(table, columnOrder, widths);
+      void this.saveStandardTableColumnWidths(widths);
+    };
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.columnResizeCleanup?.();
+      const startX = event.clientX;
+      const startWidths = getWorkingWidths();
+      const startWidth = Number(startWidths[key]) || config.width;
+      table.addClass("is-resizing-column");
+      handle.addClass("is-active");
+      document.body.addClass("paperlib-is-column-resizing");
+      handle.setPointerCapture?.(event.pointerId);
+      const move = (moveEvent) => {
+        const width = Math.min(config.max, Math.max(config.min, Math.round(startWidth + moveEvent.clientX - startX)));
+        const widths = { ...startWidths, [key]: width };
+        this.applyStandardTableColumnWidths(table, columnOrder, widths);
+        handle.setAttribute("aria-valuenow", String(width));
+      };
+      const finish = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", finish);
+        window.removeEventListener("pointercancel", finish);
+        table.removeClass("is-resizing-column");
+        handle.removeClass("is-active");
+        document.body.removeClass("paperlib-is-column-resizing");
+        if (this.columnResizeCleanup === finish) this.columnResizeCleanup = null;
+        void this.saveStandardTableColumnWidths({
+          ...this.plugin.normalizeStandardTableColumnWidths(this.plugin.settings.standardTableColumnWidths),
+          ...(this.currentStandardTableColumnWidths || {})
+        });
+      };
+      this.columnResizeCleanup = finish;
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", finish, { once: true });
+      window.addEventListener("pointercancel", finish, { once: true });
+    });
+    handle.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    handle.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      commitWidth(config.width);
+    });
+    handle.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      event.stopPropagation();
+      const direction = event.key === "ArrowRight" ? 1 : -1;
+      const current = Number(this.currentStandardTableColumnWidths?.[key]) || config.width;
+      commitWidth(Math.min(config.max, Math.max(config.min, current + direction * 16)));
+    });
+  }
+
   createSortHeader(parent, key, label, table, icon = "") {
     const button = parent.createEl("button", { cls: `paperlib-cell paperlib-sort paperlib-${key}` });
     if (icon) setPaperlibIcon(button.createSpan({ cls: "paperlib-column-header-icon" }), icon);
@@ -4888,7 +5085,7 @@ class PaperLibraryView extends ItemView {
     });
   }
 
-  createStandardSortHeader(parent, key, label) {
+  createStandardSortHeader(parent, key, label, table, columnOrder) {
     const button = parent.createEl("button", {
       cls: `paperlib-cell paperlib-sort paperlib-${key}`,
       attr: {
@@ -4901,7 +5098,10 @@ class PaperLibraryView extends ItemView {
       setPaperlibIcon(button.createSpan({ cls: "paperlib-standard-sort-direction" }),
         this.sortDirection === "asc" ? "chevron-up" : "chevron-down");
     }
+    this.installStandardColumnReorder(button, key);
+    this.installStandardColumnResizer(button, key, label, table, columnOrder);
     button.addEventListener("click", () => {
+      if (Date.now() - Number(this.columnDragFinishedAt || 0) < 180) return;
       if (this.sortKey === key) this.sortDirection = this.sortDirection === "asc" ? "desc" : "asc";
       else {
         this.sortKey = key;
@@ -4931,17 +5131,23 @@ class PaperLibraryView extends ItemView {
         item.setTitle(meta.menuLabel || meta.label).setChecked(active);
         if (meta.required) item.setDisabled(true);
         else item.onClick(async () => {
-          const nextSet = new Set(activeColumns);
-          if (active) nextSet.delete(key);
-          else nextSet.add(key);
-          this.plugin.settings.standardTableColumns = STANDARD_LIBRARY_COLUMN_ORDER
-            .filter((columnKey) => nextSet.has(columnKey));
+          this.plugin.settings.standardTableColumns = active
+            ? activeColumns.filter((columnKey) => columnKey !== key)
+            : [...activeColumns, key];
           await this.plugin.saveSettings();
           this.renderTable();
         });
       });
     });
     menu.addSeparator();
+    menu.addItem((item) => item
+      .setTitle("重置全部列宽")
+      .setIcon("columns-3")
+      .onClick(async () => {
+        this.plugin.settings.standardTableColumnWidths = {};
+        await this.plugin.saveSettings();
+        this.renderTable();
+      }));
     menu.addItem((item) => item
       .setTitle("恢复默认字段")
       .setIcon("rotate-ccw")
@@ -9101,6 +9307,18 @@ class PaperLibrarySettingTab extends PluginSettingTab {
       .addButton((button) => button
         .setButtonText("整理现有文件")
         .onClick(() => this.plugin.organizeLibraryFiles(true)));
+    new Setting(containerEl)
+      .setName("双击论文条目时")
+      .setDesc("控制论文列表与今日阅读卡片的打开方式；移动端使用双击手势，选择研究画布时仍用 PDF 阅读器。")
+      .addDropdown((dropdown) => dropdown
+        .addOption("workspace", "研究画布")
+        .addOption("pdf", "Obsidian PDF 阅读器")
+        .addOption("note", "论文笔记")
+        .setValue(normalizeDoubleClickOpenMode(this.plugin.settings.doubleClickOpenMode))
+        .onChange(async (value) => {
+          this.plugin.settings.doubleClickOpenMode = normalizeDoubleClickOpenMode(value);
+          await this.plugin.saveSettings();
+        }));
 
     containerEl.createEl("h3", { text: "浏览器扩展" });
     const extensionToggle = new Setting(containerEl)
@@ -9280,9 +9498,9 @@ class PaperLibrarySettingTab extends PluginSettingTab {
         .setButtonText(localPipelineStatus.ready ? "校验/更新" : "下载安装")
         .onClick(() => new InstallLocalPipelineModal(this.app, this.plugin, () => this.display()).open()));
     if (localPipelineStatus.ready || localPipelineStatus.installedBytes > 0 || localPipelineStatus.marker) {
-      pipelineSetting.addExtraButton((button) => button
-        .setIcon("trash-2")
-        .setTooltip("删除本地解析模型、运行时与缓存")
+      pipelineSetting.addButton((button) => button
+        .setButtonText("删除本地组件")
+        .setWarning()
         .onClick(() => new DeleteLocalPipelineModal(this.app, this.plugin, () => this.display()).open()));
     }
     new Setting(containerEl)
@@ -13676,6 +13894,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       : this.settings.activeCustomAppearanceId;
     this.settings.appearanceProtocolVersion = APPEARANCE_PROTOCOL_VERSION;
     this.settings.libraryFolder = stored?.libraryFolder || stored?.notesFolder || DEFAULT_SETTINGS.libraryFolder;
+    this.settings.doubleClickOpenMode = normalizeDoubleClickOpenMode(stored?.doubleClickOpenMode);
     this.settings.googleScholarProvider = stored?.googleScholarProvider === "serpapi" ? "serpapi" : "html";
     this.settings.extensionServerEnabled = Boolean(stored?.extensionServerEnabled);
     this.settings.extensionServerPort = Math.min(65535, Math.max(1024,
@@ -13755,6 +13974,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     this.settings.tableColumnWidths = this.normalizePaperTableColumnWidths(stored?.tableColumnWidths);
     this.settings.tableColumnOrder = this.normalizePaperTableColumnOrder(stored?.tableColumnOrder);
     this.settings.standardTableColumns = this.normalizeStandardTableColumns(stored?.standardTableColumns);
+    this.settings.standardTableColumnWidths = this.normalizeStandardTableColumnWidths(stored?.standardTableColumnWidths);
     this.settings.jcrRankCache = stored?.jcrRankCacheVersion === DEFAULT_SETTINGS.jcrRankCacheVersion
       && stored?.jcrRankCache && typeof stored.jcrRankCache === "object" ? stored.jcrRankCache : {};
     this.settings.jcrRankCacheVersion = DEFAULT_SETTINGS.jcrRankCacheVersion;
@@ -14103,6 +14323,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       ? editorCustomId
       : normalized.activeCustomAppearanceId;
     normalized.appearanceProtocolVersion = APPEARANCE_PROTOCOL_VERSION;
+    normalized.doubleClickOpenMode = normalizeDoubleClickOpenMode(normalized.doubleClickOpenMode);
     normalized.papers = Array.isArray(normalized.papers) ? normalized.papers : [];
     normalized.paperDeletionTombstones = normalized.paperDeletionTombstones
       && typeof normalized.paperDeletionTombstones === "object"
@@ -14130,6 +14351,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     normalized.tableColumnWidths = this.normalizePaperTableColumnWidths(normalized.tableColumnWidths);
     normalized.tableColumnOrder = this.normalizePaperTableColumnOrder(normalized.tableColumnOrder);
     normalized.standardTableColumns = this.normalizeStandardTableColumns(normalized.standardTableColumns);
+    normalized.standardTableColumnWidths = this.normalizeStandardTableColumnWidths(normalized.standardTableColumnWidths);
     return normalized;
   }
 
@@ -14732,11 +14954,24 @@ module.exports = class PaperLibraryPlugin extends Plugin {
 
   normalizeStandardTableColumns(columns) {
     const source = Array.isArray(columns) ? columns : DEFAULT_STANDARD_LIBRARY_COLUMNS;
-    const selected = new Set(source
+    const normalized = source
       .map((key) => String(key || ""))
-      .filter((key) => STANDARD_LIBRARY_COLUMN_ORDER.includes(key)));
-    selected.add("title");
-    return STANDARD_LIBRARY_COLUMN_ORDER.filter((key) => selected.has(key));
+      .filter((key, index, values) => STANDARD_LIBRARY_COLUMN_ORDER.includes(key) && values.indexOf(key) === index);
+    if (!normalized.includes("title")) {
+      const typeIndex = normalized.indexOf("type");
+      normalized.splice(typeIndex >= 0 ? typeIndex + 1 : 0, 0, "title");
+    }
+    return normalized;
+  }
+
+  normalizeStandardTableColumnWidths(widths = {}) {
+    if (!widths || typeof widths !== "object" || Array.isArray(widths)) return {};
+    return Object.fromEntries(STANDARD_LIBRARY_COLUMN_ORDER.flatMap((key) => {
+      const config = STANDARD_LIBRARY_COLUMN_META[key];
+      const value = Number(widths[key]);
+      if (!config || !Number.isFinite(value)) return [];
+      return [[key, Math.min(config.max, Math.max(config.min, Math.round(value)))]];
+    }));
   }
 
   normalizeVenueRanks(value = []) {
@@ -23013,6 +23248,13 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     const file = await this.ensurePaperNote(paper);
     if (!file) return;
     await this.app.workspace.getLeaf("tab").openFile(file);
+  }
+
+  async openPaperFromDoubleClick(paper) {
+    const mode = normalizeDoubleClickOpenMode(this.settings.doubleClickOpenMode);
+    if (mode === "note") return this.openOrCreateNote(paper);
+    if (mode === "pdf") return this.openPaperPdf(paper, { native: true });
+    return this.openPaperPdf(paper, { native: this.isMobileApp() });
   }
 
   async openPaperPdf(paper, options = {}) {
