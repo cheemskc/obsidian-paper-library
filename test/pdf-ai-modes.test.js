@@ -13,6 +13,9 @@ assert.ok(main.includes('this.settings.pdfAiMode = normalizePdfAiMode(stored?.pd
 assert.ok(main.includes('{ id: "local", label: "内置本地解析"'), "Composer mode menu must expose local processing");
 assert.ok(main.includes('{ id: "mineru", label: "MinerU"'), "Composer mode menu must expose MinerU V1 processing");
 assert.ok(main.includes('{ id: "direct", label: "源文件"'), "Composer must expose direct PDF mode");
+assert.ok(main.includes("renderMineruPdfSettings(mineruSettingsHost)"), "changing PDF mode must update only the MinerU subsection");
+const pdfModeSetting = main.slice(main.indexOf('.setName("默认 PDF 处理模式")'), main.indexOf("const localPipelineStatus"));
+assert.ok(!pdfModeSetting.includes("this.display()"), "changing PDF mode must not rebuild the full settings page and reset scroll");
 assert.ok(main.includes("sendClaudianMessageWithPdf"), "PDF preparation must be part of the Composer send path");
 assert.ok(main.includes("turnRequestOverride: request"), "Composer must separate visible text from injected PDF context");
 assert.ok(main.includes("request.externalContextPaths"), "direct mode must attach the real PDF path to the agent turn");

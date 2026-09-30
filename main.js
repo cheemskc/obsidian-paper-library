@@ -9292,6 +9292,72 @@ class PaperLibrarySettingTab extends PluginSettingTab {
     }
   }
 
+  renderMineruPdfSettings(containerEl) {
+    if (!containerEl) return;
+    containerEl.empty();
+    if (this.plugin.getPdfAiMode() !== "mineru") return;
+    new Setting(containerEl)
+      .setName("MinerU V1 服务地址")
+      .setDesc("本机默认地址为 http://127.0.0.1:8000；只填写服务根地址，不要附加 /v1。")
+      .addText((text) => text
+        .setPlaceholder(MINERU_DEFAULT_API_BASE)
+        .setValue(this.plugin.settings.mineruApiBase)
+        .onChange(async (value) => {
+          this.plugin.settings.mineruApiBase = String(value || "").trim();
+          this.plugin.mineruConnectionStatus = null;
+          await this.plugin.saveSettings();
+        }));
+    new Setting(containerEl)
+      .setName("MinerU 解析质量")
+      .setDesc("standard 适合日常论文；advanced 更慢，复杂公式与版面可尝试。")
+      .addDropdown((dropdown) => dropdown
+        .addOption("flash", "Flash")
+        .addOption("basic", "Basic")
+        .addOption("standard", "Standard")
+        .addOption("advanced", "Advanced")
+        .setValue(this.plugin.settings.mineruTier)
+        .onChange(async (value) => {
+          this.plugin.settings.mineruTier = normalizeMineruTier(value);
+          await this.plugin.saveSettings();
+        }));
+    const secretSetting = new Setting(containerEl)
+      .setName("MinerU API 密钥")
+      .setDesc("本机无鉴权服务可留空；远端密钥通过 Obsidian SecretStorage 保存，普通插件设置中只记录密钥名称。");
+    if (SecretComponent && requireApiVersion?.("1.11.4")) {
+      secretSetting.addComponent((el) => new SecretComponent(this.app, el)
+        .setValue(this.plugin.settings.mineruSecretName || "")
+        .onChange(async (value) => {
+          this.plugin.settings.mineruSecretName = String(value || "").trim();
+          this.plugin.mineruConnectionStatus = null;
+          await this.plugin.saveSettings();
+        }));
+    } else {
+      secretSetting.setDesc("当前 Obsidian 版本不支持安全密钥选择；本机无鉴权 MinerU 仍可使用。远端服务请升级到 Obsidian 1.11.4 或更高版本。");
+    }
+    const connection = new Setting(containerEl)
+      .setName("连接测试")
+      .setDesc(this.plugin.mineruConnectionStatus?.message || "验证 /v1/health 与 Markdown、结构化内容输出能力。")
+      .addButton((button) => button.setButtonText("测试连接").onClick(async () => {
+        button.setDisabled(true).setButtonText("正在测试…");
+        try {
+          await this.plugin.testMineruConnection();
+          new Notice("MinerU V1 服务连接正常");
+        } catch (error) {
+          new Notice(`MinerU 连接失败：${error?.message || error}`);
+        } finally {
+          this.renderMineruPdfSettings(containerEl);
+        }
+      }));
+    connection.settingEl.toggleClass?.("is-success", this.plugin.mineruConnectionStatus?.ok === true);
+    new Setting(containerEl)
+      .setName("MinerU 解析缓存")
+      .setDesc(`${this.plugin.getMineruCacheRoot()} · 只保存 Markdown 与结构化结果，不复制原始 PDF。`)
+      .addButton((button) => button.setButtonText("打开目录").onClick(() => this.plugin.openMineruCacheDirectory()))
+      .addButton((button) => button.setButtonText("清空缓存").setWarning().onClick(() => (
+        new DeleteMineruCacheModal(this.app, this.plugin, () => this.renderMineruPdfSettings(containerEl)).open()
+      )));
+  }
+
   display() {
     this.composerSettingsObserver?.disconnect?.();
     this.composerSettingsObserver = null;
@@ -9574,6 +9640,7 @@ class PaperLibrarySettingTab extends PluginSettingTab {
       cls: "setting-item-description",
       text: "文档链路已经并入 Paper Composer：可用内置本地模型、MinerU V1 服务或完整源文件建立全文上下文。选区和圈选图片仍会自动关联完整文档。"
     });
+    let mineruSettingsHost = null;
     new Setting(containerEl)
       .setName("默认 PDF 处理模式")
       .setDesc("也可在 Paper Composer 输入框顶部随时切换；切换会作用于下一次发送。")
@@ -9585,70 +9652,10 @@ class PaperLibrarySettingTab extends PluginSettingTab {
         .onChange(async (value) => {
           await this.plugin.setPdfAiMode(value);
           this.plugin.refreshComposerPdfTrays?.();
-          this.display();
+          this.renderMineruPdfSettings(mineruSettingsHost);
         }));
-    if (this.plugin.getPdfAiMode() === "mineru") {
-      new Setting(containerEl)
-        .setName("MinerU V1 服务地址")
-        .setDesc("本机默认地址为 http://127.0.0.1:8000；只填写服务根地址，不要附加 /v1。")
-        .addText((text) => text
-          .setPlaceholder(MINERU_DEFAULT_API_BASE)
-          .setValue(this.plugin.settings.mineruApiBase)
-          .onChange(async (value) => {
-            this.plugin.settings.mineruApiBase = String(value || "").trim();
-            this.plugin.mineruConnectionStatus = null;
-            await this.plugin.saveSettings();
-          }));
-      new Setting(containerEl)
-        .setName("MinerU 解析质量")
-        .setDesc("standard 适合日常论文；advanced 更慢，复杂公式与版面可尝试。")
-        .addDropdown((dropdown) => dropdown
-          .addOption("flash", "Flash")
-          .addOption("basic", "Basic")
-          .addOption("standard", "Standard")
-          .addOption("advanced", "Advanced")
-          .setValue(this.plugin.settings.mineruTier)
-          .onChange(async (value) => {
-            this.plugin.settings.mineruTier = normalizeMineruTier(value);
-            await this.plugin.saveSettings();
-          }));
-      const secretSetting = new Setting(containerEl)
-        .setName("MinerU API 密钥")
-        .setDesc("本机无鉴权服务可留空；远端密钥通过 Obsidian SecretStorage 保存，普通插件设置中只记录密钥名称。");
-      if (SecretComponent && requireApiVersion?.("1.11.4")) {
-        secretSetting.addComponent((el) => new SecretComponent(this.app, el)
-          .setValue(this.plugin.settings.mineruSecretName || "")
-          .onChange(async (value) => {
-            this.plugin.settings.mineruSecretName = String(value || "").trim();
-            this.plugin.mineruConnectionStatus = null;
-            await this.plugin.saveSettings();
-          }));
-      } else {
-        secretSetting.setDesc("当前 Obsidian 版本不支持安全密钥选择；本机无鉴权 MinerU 仍可使用。远端服务请升级到 Obsidian 1.11.4 或更高版本。");
-      }
-      const connection = new Setting(containerEl)
-        .setName("连接测试")
-        .setDesc(this.plugin.mineruConnectionStatus?.message || "验证 /v1/health 与 Markdown、结构化内容输出能力。")
-        .addButton((button) => button.setButtonText("测试连接").onClick(async () => {
-          button.setDisabled(true).setButtonText("正在测试…");
-          try {
-            await this.plugin.testMineruConnection();
-            new Notice("MinerU V1 服务连接正常");
-          } catch (error) {
-            new Notice(`MinerU 连接失败：${error?.message || error}`);
-          } finally {
-            this.display();
-          }
-        }));
-      connection.settingEl.toggleClass?.("is-success", this.plugin.mineruConnectionStatus?.ok === true);
-      new Setting(containerEl)
-        .setName("MinerU 解析缓存")
-        .setDesc(`${this.plugin.getMineruCacheRoot()} · 只保存 Markdown 与结构化结果，不复制原始 PDF。`)
-        .addButton((button) => button.setButtonText("打开目录").onClick(() => this.plugin.openMineruCacheDirectory()))
-        .addButton((button) => button.setButtonText("清空缓存").setWarning().onClick(() => (
-          new DeleteMineruCacheModal(this.app, this.plugin, () => this.display()).open()
-        )));
-    }
+    mineruSettingsHost = containerEl.createDiv({ cls: "paperlib-mineru-settings" });
+    this.renderMineruPdfSettings(mineruSettingsHost);
     const localPipelineStatus = this.plugin.getLocalPipelinePackStatus();
     const pipelineSetting = new Setting(containerEl)
       .setName("本地解析模型")
