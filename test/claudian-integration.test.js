@@ -301,6 +301,7 @@ assert.ok(main.includes("resizeComposerPromptInput"), "the Composer prompt must 
 assert.ok(main.includes("input.rows = 1"), "the Composer prompt must begin at a compact single-row height");
 assert.ok(styles.includes("min-height: 42px !important") && styles.includes("max-height: min(180px, 28vh) !important"), "the Codex-style prompt surface must stay compact and cap long input growth");
 assert.ok(styles.includes("border-radius: 16px !important"), "the Composer shell must use one restrained outer radius");
+assert.ok(styles.includes("textarea.paper-composer-input:is(:hover, :focus, :focus-visible)") && styles.includes("border: 0 !important"), "the textarea must not draw internal horizontal borders in any interaction state");
 assert.ok(styles.includes("width: min(220px, calc(100vw - 20px))"), "the unified model menu must stay compact in the sidebar");
 assert.ok(main.includes('row.addEventListener("pointerdown"') && main.includes("openSubmenu();"), "submenu navigation must survive Composer toolbar refreshes between pointerdown and click");
 assert.ok(main.includes("activateOnPointerDown = false") && main.includes("pointerHandled = true"), "model and reasoning choices must commit before Composer replaces their menu nodes");

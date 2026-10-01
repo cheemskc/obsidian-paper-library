@@ -696,12 +696,24 @@
   max-height: min(180px, 28vh) !important;
   flex: 0 0 auto !important;
   padding: 9px 12px 4px !important;
+  appearance: none;
+  border: 0 !important;
   border-radius: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
   color: var(--text-normal);
   font-family: var(--font-interface);
   font-size: 13px;
   line-height: 1.45;
+  box-shadow: none !important;
   overflow-y: hidden;
+}
+
+.workspace-leaf-content[data-type="paperlib-paper-composer-view"] .paperlib-codex-composer-input textarea.paper-composer-input:is(:hover, :focus, :focus-visible) {
+  border: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
 }
 
 .workspace-leaf-content[data-type="paperlib-paper-composer-view"] .paperlib-codex-composer-input textarea.paper-composer-input::placeholder {
