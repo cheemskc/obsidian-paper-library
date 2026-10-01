@@ -11386,20 +11386,79 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     const runtime = this.claudianRuntime;
     const key = this.composerPaperConversationKey(paper, sourcePath);
     if (!runtime || !key) return null;
+    const paths = new Set([paper?.pdfPath, paper?.notePath, sourcePath]
+      .map((path) => normalizePath(path || ""))
+      .filter(Boolean));
     const record = this.settings?.paperComposerPaperConversations?.[key];
     const rememberedId = String(record?.conversationId || "");
     if (rememberedId) {
       await runtime.ensureConversationMetadataLoaded?.([rememberedId]);
       const remembered = await runtime.getConversationById?.(rememberedId);
-      if (remembered) return remembered;
+      const linkedPath = normalizePath(remembered?.linkedContentPath || "");
+      const duplicateBinding = Object.entries(this.settings?.paperComposerPaperConversations || {})
+        .some(([otherKey, otherRecord]) => (
+          otherKey !== key && String(otherRecord?.conversationId || "") === rememberedId
+        ));
+      if (remembered && (linkedPath ? paths.has(linkedPath) : !duplicateBinding)) return remembered;
     }
-    const paths = new Set([paper?.pdfPath, paper?.notePath, sourcePath]
-      .map((path) => normalizePath(path || ""))
-      .filter(Boolean));
     const conversations = await runtime.getConversationList?.() || [];
     return conversations
       .filter((conversation) => paths.has(normalizePath(conversation?.linkedContentPath || "")))
       .sort((left, right) => (Number(right?.lastActivityAt) || 0) - (Number(left?.lastActivityAt) || 0))[0] || null;
+  }
+
+  composerPaperMetadataForConversation(conversationId = "") {
+    const id = String(conversationId || "");
+    if (!id) return null;
+    const store = this.settings?.paperComposerPaperConversations;
+    const records = store && typeof store === "object" && !Array.isArray(store)
+      ? Object.values(store)
+        .filter((record) => String(record?.conversationId || "") === id)
+        .sort((left, right) => (Number(right?.updatedAt) || 0) - (Number(left?.updatedAt) || 0))
+      : [];
+    const record = records[0] || null;
+    const conversation = this.claudianRuntime?.getCachedConversation?.(id)
+      || this.claudianRuntime?.getConversationSync?.(id)
+      || null;
+    const sourcePath = normalizePath(record?.sourcePath || conversation?.linkedContentPath || "");
+    const paperId = String(record?.paperId || "");
+    const paper = (this.settings?.papers || []).find((candidate) => (
+      (paperId && String(candidate?.id || "") === paperId)
+      || (sourcePath && [candidate?.pdfPath, candidate?.notePath]
+        .map((path) => normalizePath(path || ""))
+        .includes(sourcePath))
+    )) || null;
+    const fallbackName = sourcePath.split("/").pop()?.replace(/\.[^.]+$/, "") || "";
+    const title = String(paper?.title || record?.title || fallbackName || "").trim();
+    return title ? { paper, sourcePath, title } : null;
+  }
+
+  decorateComposerHistoryItems(tab) {
+    const container = tab?.dom?.inputEl?.closest?.(".paper-composer-container");
+    if (!container?.querySelectorAll) return;
+    for (const item of container.querySelectorAll(".paper-composer-history-item[data-conversation-id]")) {
+      const content = item.querySelector(".paper-composer-history-item-content");
+      const title = content?.querySelector(".paper-composer-history-item-title");
+      if (!content || !title) continue;
+      const metadata = this.composerPaperMetadataForConversation(item.dataset.conversationId);
+      let paperRow = content.querySelector(":scope > .paperlib-composer-history-paper");
+      if (!paperRow) {
+        paperRow = document.createElement("div");
+        paperRow.className = "paperlib-composer-history-paper";
+        const icon = document.createElement("span");
+        icon.className = "paperlib-composer-history-paper-icon";
+        setIcon(icon, "file-text");
+        const label = document.createElement("span");
+        label.className = "paperlib-composer-history-paper-label";
+        paperRow.append(icon, label);
+        title.after(paperRow);
+      }
+      const paperTitle = metadata?.title || "未关联文献";
+      const label = paperRow.querySelector(".paperlib-composer-history-paper-label");
+      if (label && label.textContent !== paperTitle) label.textContent = paperTitle;
+      paperRow.toggleClass?.("is-unlinked", !metadata);
+      item.toggleClass?.("paperlib-composer-history-item--linked", Boolean(metadata));
+    }
   }
 
   rememberComposerPaperConversation(tab, state = tab?.paperLibraryPdfState) {
@@ -11408,12 +11467,20 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     if (!key || !conversationId || state?.paperConversationSwitching) return false;
     const current = this.settings?.paperComposerPaperConversations?.[key];
     const sourcePath = normalizePath(state.paperConversationSourcePath || "");
-    if (current?.conversationId === conversationId && current?.sourcePath === sourcePath) return false;
     const store = this.settings.paperComposerPaperConversations
       && typeof this.settings.paperComposerPaperConversations === "object"
       && !Array.isArray(this.settings.paperComposerPaperConversations)
       ? { ...this.settings.paperComposerPaperConversations }
       : {};
+    let removedDuplicate = false;
+    for (const [otherKey, otherRecord] of Object.entries(store)) {
+      if (otherKey === key || String(otherRecord?.conversationId || "") !== conversationId) continue;
+      delete store[otherKey];
+      removedDuplicate = true;
+    }
+    if (!removedDuplicate && current?.conversationId === conversationId && current?.sourcePath === sourcePath) {
+      return false;
+    }
     store[key] = {
       conversationId,
       paperId: String(state.paperConversationPaperId || ""),
@@ -11423,6 +11490,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     };
     this.settings.paperComposerPaperConversations = store;
     void this.saveSettings();
+    this.decorateComposerHistoryItems(tab);
     return true;
   }
 
@@ -11461,10 +11529,12 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       if (conversation?.id && tab.conversationId !== conversation.id) {
         await tab.controllers?.conversationController?.switchTo?.(conversation.id);
       } else if (!conversation) {
-        const isDifferentPaper = Boolean(state.paperConversationKey && state.paperConversationKey !== key);
-        if (isDifferentPaper || this.composerTabHasMessages(tab)) {
-          await tab.controllers?.conversationController?.createNew?.({ force: true });
-        }
+        const created = await runtime.createConversation?.({
+          providerId: tab.providerId || undefined,
+          linkedContentPath: sourcePath
+        });
+        if (!created?.id) throw new Error("无法为当前文献创建 Paper Composer 会话");
+        await tab.controllers?.conversationController?.switchTo?.(created.id);
       }
       state.paperConversationKey = key;
       state.paperConversationPaperId = String(paper.id || "");
@@ -11902,6 +11972,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     this.decorateComposerVisibleUserPrompts(tab);
     this.decorateClaudianSentImageCards(tab);
     this.decorateClaudianSentPdfCards(tab);
+    this.decorateComposerHistoryItems(tab);
     this.ensureComposerTurnNavigator(tab, state);
     this.ensureComposerTopControls(tab, state);
     this.ensureComposerCodexInput(tab, state);
@@ -12593,6 +12664,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
           }
           this.ensureComposerTopControls(tab, state);
           this.ensureComposerCodexInput(tab, state);
+          this.decorateComposerHistoryItems(tab);
         }, 0);
       });
       state.topControlsObserver.observe(container, { childList: true, subtree: true });
