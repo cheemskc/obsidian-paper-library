@@ -1150,7 +1150,8 @@ const DEFAULT_SETTINGS = {
   mineruSecretName: "",
   paperComposerModelOptionsVersion: 0,
   paperComposerPdfMessageCards: {},
-  paperComposerDirectContextBindings: {}
+  paperComposerDirectContextBindings: {},
+  paperComposerPaperConversations: {}
 };
 
 const obsidianSetIcon = setIcon;
@@ -10006,10 +10007,9 @@ module.exports = class PaperLibraryPlugin extends Plugin {
   registerPaperComposerIcon() {
     addIcon(PAPER_COMPOSER_ICON, [
       '<g transform="scale(4.1666667)">',
-      '<path d="M6 2.75h7.5L18 7.25v14H6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>',
-      '<path d="M13.5 2.75v4.5H18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>',
-      '<path d="m10 9 .55 1.45L12 11l-1.45.55L10 13l-.55-1.45L8 11l1.45-.55z" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>',
-      '<path d="m14.5 13 .75 1.75L17 15.5l-1.75.75L14.5 18l-.75-1.75L12 15.5l1.75-.75z" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>',
+      '<path d="M5 5.25h14a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2h-7.25L7 21v-3.25H5a2 2 0 0 1-2-2v-8.5a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/>',
+      '<path d="M8 10h5.25M8 13.5h8" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round"/>',
+      '<path d="m17.25 2 .45 1.25L19 3.7l-1.3.45-.45 1.3-.45-1.3-1.3-.45 1.3-.45z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>',
       '</g>'
     ].join(""));
   }
@@ -10220,6 +10220,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     this.claudianLoadError = null;
     this.composerPdfTabs = new Set();
     this.composerMountObserver = null;
+    this.composerPaperSyncRevision = 0;
+    this.composerPaperSyncQueue = Promise.resolve();
     this.mineruActiveTasks = new Set();
     this.mineruConnectionStatus = null;
     await this.loadSettings();
@@ -10375,7 +10377,12 @@ module.exports = class PaperLibraryPlugin extends Plugin {
           // disappear until the user found the command again.
           try { await this.ensureDetailView(false); }
           catch (error) { console.warn("Paper Library: detail sidebar unavailable", error); }
-          try { await this.ensurePaperComposerView(false); }
+          try {
+            await this.ensurePaperComposerView(false);
+            const activeFile = this.app.workspace.getActiveFile?.();
+            this.queuePaperComposerFileSync(activeFile);
+            await this.composerPaperSyncQueue;
+          }
           catch (error) { console.warn("Paper Library: Composer sidebar unavailable", error); }
           try { await this.migratePortablePdfFigureCatalogs(); }
           catch (error) { console.warn("Paper Library: portable figure catalog migration unavailable", error); }
@@ -10423,6 +10430,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
 
   onunload() {
     this.stopExtensionServer();
+    this.composerPaperSyncRevision += 1;
     for (const task of this.mineruActiveTasks || []) task.cancelled = true;
     this.mineruActiveTasks?.clear?.();
     this.composerMountObserver?.disconnect?.();
@@ -10438,6 +10446,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
         tab.controllers.inputController.sendMessage = state.originalSendMessage;
       }
       state?.topControlsObserver?.disconnect?.();
+      this.cleanupComposerTurnNavigator(tab, state);
       this.cleanupComposerUnifiedModelControl(tab, state);
       state?.strip?.remove?.();
       delete tab.paperLibraryPdfState;
@@ -10968,6 +10977,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
   async addFileToPaperComposer(file, runtime = this.claudianRuntime) {
     if (!file?.path) return false;
     await this.activateIsolatedPaperComposerView(runtime);
+    const paper = this.findPaperForComposerPath(file.path);
+    if (paper) return this.activateComposerConversationForPaper(paper, file, { focus: true });
     const tab = await this.waitForClaudianTab();
     const path = normalizePath(file.path);
     const extension = String(file.extension || path.split(".").pop() || "").toLocaleLowerCase();
@@ -11009,7 +11020,10 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       const sourceFile = sourcePaths
         .map((path) => this.app.vault.getAbstractFileByPath(path))
         .find((file) => file?.path);
-      if (sourceFile) return await this.addFileToPaperComposer(sourceFile);
+      if (sourceFile) {
+        await this.activateIsolatedPaperComposerView(this.claudianRuntime);
+        return await this.activateComposerConversationForPaper(paper, sourceFile, { focus: true });
+      }
 
       const attachment = await this.paperToAIAttachment(paper);
       await this.addAIContext(attachment, { allowActiveFileFallback: false });
@@ -11024,25 +11038,46 @@ module.exports = class PaperLibraryPlugin extends Plugin {
 
   installPaperComposerWorkspaceBridge() {
     if (!this.app.workspace?.on || !this.registerEvent) return;
-    this.registerEvent(this.app.workspace.on("file-open", (file) => {
-      const extension = String(file?.extension || "").toLocaleLowerCase();
-      if (extension !== "md" && extension !== "pdf") return;
+    const syncFile = (file) => this.queuePaperComposerFileSync(file);
+    this.registerEvent(this.app.workspace.on("file-open", syncFile));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", () => {
+      syncFile(this.app.workspace.getActiveFile?.());
+    }));
+  }
+
+  async syncPaperComposerFile(file) {
+    const extension = String(file?.extension || "").toLocaleLowerCase();
+    if (extension === "pdf") return this.syncPaperComposerLinkedPdf(file);
+    if (extension === "md") return this.syncPaperComposerLinkedMarkdown(file);
+    return false;
+  }
+
+  queuePaperComposerFileSync(file) {
+    const extension = String(file?.extension || "").toLocaleLowerCase();
+    if (extension !== "md" && extension !== "pdf") return;
+    const revision = ++this.composerPaperSyncRevision;
+    const run = async () => {
+      if (revision !== this.composerPaperSyncRevision) return false;
       // Let Obsidian finish changing the active leaf and let the embedded
       // runtime process its own event first. The follow-up below only touches
       // the namespaced Paper Composer runtime, never another plugin instance.
-      window.setTimeout(() => {
-        const sync = extension === "pdf"
-          ? this.syncPaperComposerLinkedPdf(file)
-          : this.syncPaperComposerLinkedMarkdown(file);
-        void sync.catch((error) => {
-          console.warn("Paper Library: failed to sync linked content into Paper Composer", error);
-        });
-      }, 0);
-    }));
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      if (revision !== this.composerPaperSyncRevision) return false;
+      return this.syncPaperComposerFile(file);
+    };
+    this.composerPaperSyncQueue = this.composerPaperSyncQueue
+      .catch(() => {})
+      .then(run)
+      .catch((error) => {
+        console.warn("Paper Library: failed to sync linked content into Paper Composer", error);
+        return false;
+      });
   }
 
   async syncPaperComposerLinkedPdf(file) {
     if (String(file?.extension || "").toLocaleLowerCase() !== "pdf" || !file?.path) return false;
+    const paper = this.findPaperForComposerPath(file.path);
+    if (paper) return this.activateComposerConversationForPaper(paper, file);
     const runtime = this.claudianRuntime;
     const view = runtime?.getView?.();
     if (!view) return false;
@@ -11111,6 +11146,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
 
   async syncPaperComposerLinkedMarkdown(file) {
     if (String(file?.extension || "").toLocaleLowerCase() !== "md" || !file?.path) return false;
+    const paper = this.findPaperForComposerPath(file.path);
+    if (paper) return this.activateComposerConversationForPaper(paper, file);
     const runtime = this.claudianRuntime;
     const view = runtime?.getView?.();
     if (!view) return false;
@@ -11308,6 +11345,315 @@ module.exports = class PaperLibraryPlugin extends Plugin {
         group.append(card);
       }
     }
+  }
+
+  decorateComposerVisibleUserPrompts(tab) {
+    const messages = tab?.dom?.messagesEl;
+    if (!messages?.querySelectorAll) return;
+    for (const message of messages.querySelectorAll(".paper-composer-message-user")) {
+      const content = message.querySelector(".paper-composer-message-content");
+      const heading = content?.querySelector('h2[data-heading="Paper Library PDF 解析上下文"]');
+      if (!heading) continue;
+      let node = heading;
+      while (node) {
+        const next = node.nextSibling;
+        node.remove();
+        node = next;
+      }
+      message.addClass?.("paperlib-paper-composer-context-hidden");
+    }
+  }
+
+  findPaperForComposerPath(sourcePath = "") {
+    const path = normalizePath(sourcePath || "");
+    if (!path) return null;
+    return (this.settings?.papers || []).find((paper) => (
+      [paper?.pdfPath, paper?.notePath]
+        .map((candidate) => normalizePath(candidate || ""))
+        .filter(Boolean)
+        .includes(path)
+    )) || null;
+  }
+
+  composerPaperConversationKey(paper, sourcePath = "") {
+    const paperId = String(paper?.id || "").trim();
+    if (paperId) return `paper:${paperId}`;
+    const path = normalizePath(sourcePath || paper?.pdfPath || paper?.notePath || "");
+    return path ? `file:${path}` : "";
+  }
+
+  async findComposerConversationForPaper(paper, sourcePath = "") {
+    const runtime = this.claudianRuntime;
+    const key = this.composerPaperConversationKey(paper, sourcePath);
+    if (!runtime || !key) return null;
+    const record = this.settings?.paperComposerPaperConversations?.[key];
+    const rememberedId = String(record?.conversationId || "");
+    if (rememberedId) {
+      await runtime.ensureConversationMetadataLoaded?.([rememberedId]);
+      const remembered = await runtime.getConversationById?.(rememberedId);
+      if (remembered) return remembered;
+    }
+    const paths = new Set([paper?.pdfPath, paper?.notePath, sourcePath]
+      .map((path) => normalizePath(path || ""))
+      .filter(Boolean));
+    const conversations = await runtime.getConversationList?.() || [];
+    return conversations
+      .filter((conversation) => paths.has(normalizePath(conversation?.linkedContentPath || "")))
+      .sort((left, right) => (Number(right?.lastActivityAt) || 0) - (Number(left?.lastActivityAt) || 0))[0] || null;
+  }
+
+  rememberComposerPaperConversation(tab, state = tab?.paperLibraryPdfState) {
+    const key = String(state?.paperConversationKey || "");
+    const conversationId = String(tab?.conversationId || "");
+    if (!key || !conversationId || state?.paperConversationSwitching) return false;
+    const current = this.settings?.paperComposerPaperConversations?.[key];
+    const sourcePath = normalizePath(state.paperConversationSourcePath || "");
+    if (current?.conversationId === conversationId && current?.sourcePath === sourcePath) return false;
+    const store = this.settings.paperComposerPaperConversations
+      && typeof this.settings.paperComposerPaperConversations === "object"
+      && !Array.isArray(this.settings.paperComposerPaperConversations)
+      ? { ...this.settings.paperComposerPaperConversations }
+      : {};
+    store[key] = {
+      conversationId,
+      paperId: String(state.paperConversationPaperId || ""),
+      title: String(state.paperConversationTitle || ""),
+      sourcePath,
+      updatedAt: Date.now()
+    };
+    this.settings.paperComposerPaperConversations = store;
+    void this.saveSettings();
+    return true;
+  }
+
+  async activateComposerConversationForPaper(paper, openedFile = null, options = {}) {
+    const runtime = this.claudianRuntime;
+    const view = runtime?.getView?.();
+    if (!paper || !view) return false;
+    const manager = view.getTabManager?.();
+    await manager?.waitForTabSwitchIdle?.();
+    const tab = manager?.getActiveTab?.();
+    if (!tab?.dom?.inputEl) return false;
+    const pdfPath = normalizePath(paper.pdfPath || "");
+    const notePath = normalizePath(paper.notePath || "");
+    const openedPath = normalizePath(openedFile?.path || "");
+    const sourcePath = pdfPath || notePath || openedPath;
+    const key = this.composerPaperConversationKey(paper, sourcePath);
+    if (!key || !sourcePath) return false;
+    const state = this.getComposerPdfState(tab);
+    const rememberedConversationId = String(
+      this.settings?.paperComposerPaperConversations?.[key]?.conversationId || ""
+    );
+    const expectedAttachmentKey = pdfPath ? `vault:${pdfPath}` : "";
+    const alreadyBound = state.paperConversationKey === key
+      && state.paperConversationSourcePath === sourcePath
+      && (!rememberedConversationId || rememberedConversationId === String(tab.conversationId || ""))
+      && (!expectedAttachmentKey || state.attachments?.some((attachment) => attachment.key === expectedAttachmentKey));
+    if (alreadyBound) {
+      this.ensureClaudianPdfBridge(tab);
+      this.rememberComposerPaperConversation(tab, state);
+      if (options.focus) tab.dom.inputEl.focus?.();
+      return true;
+    }
+    state.paperConversationSwitching = true;
+    try {
+      const conversation = await this.findComposerConversationForPaper(paper, sourcePath);
+      if (conversation?.id && tab.conversationId !== conversation.id) {
+        await tab.controllers?.conversationController?.switchTo?.(conversation.id);
+      } else if (!conversation) {
+        const isDifferentPaper = Boolean(state.paperConversationKey && state.paperConversationKey !== key);
+        if (isDifferentPaper || this.composerTabHasMessages(tab)) {
+          await tab.controllers?.conversationController?.createNew?.({ force: true });
+        }
+      }
+      state.paperConversationKey = key;
+      state.paperConversationPaperId = String(paper.id || "");
+      state.paperConversationTitle = String(paper.title || openedFile?.basename || openedFile?.name || "");
+      state.paperConversationSourcePath = sourcePath;
+      for (const attachment of state.attachments || []) attachment.cancelled = true;
+      state.attachments = [];
+      if (pdfPath) {
+        const pdfFile = this.app.vault.getAbstractFileByPath(pdfPath);
+        if (pdfFile?.path) {
+          this.syncComposerPdfLinkedContent(tab, pdfPath);
+          this.replaceComposerWorkspaceLinkedPdf(tab, {
+            name: pdfFile.name,
+            path: pdfPath,
+            byteLength: pdfFile.stat?.size || 0,
+            key: `vault:${pdfPath}`,
+            keepBytes: false
+          }, () => this.app.vault.readBinary(pdfFile));
+        }
+      } else {
+        const controller = tab.ui?.linkedContentController;
+        if (controller?.selectExplicit) {
+          const snapshot = controller.getSnapshot?.();
+          if (snapshot?.mode === "locked" && controller.resetAutoDraft) controller.resetAutoDraft();
+          controller.selectExplicit(sourcePath);
+        }
+        this.clearComposerWorkspaceLinkedPdf(tab);
+      }
+      this.ensureClaudianPdfBridge(tab);
+    } finally {
+      state.paperConversationSwitching = false;
+    }
+    this.rememberComposerPaperConversation(tab, state);
+    if (options.focus) tab.dom.inputEl.focus?.();
+    return true;
+  }
+
+  cleanupComposerTurnNavigator(tab, state = tab?.paperLibraryPdfState) {
+    if (!state) return;
+    if (state.turnNavigatorMessagesEl && state.turnNavigatorScrollHandler) {
+      state.turnNavigatorMessagesEl.removeEventListener("scroll", state.turnNavigatorScrollHandler);
+    }
+    if (state.turnNavigatorFrame) window.cancelAnimationFrame(state.turnNavigatorFrame);
+    state.turnNavigatorResizeObserver?.disconnect?.();
+    state.turnNavigator?.closest?.(".paper-composer-messages-wrapper")
+      ?.removeClass?.("paperlib-turn-navigator-active");
+    state.turnNavigator?.remove?.();
+    state.turnNavigator = null;
+    state.turnNavigatorMessagesEl = null;
+    state.turnNavigatorScrollHandler = null;
+    state.turnNavigatorResizeObserver = null;
+    state.turnNavigatorFrame = 0;
+    state.turnNavigatorSignature = "";
+  }
+
+  composerTurnPreviewText(element, maxLength = 160) {
+    const text = String(element?.dataset?.tocTitle || element?.textContent || "")
+      .replace(/^Thought for\s+\d+(?:\.\d+)?s\s*/i, "")
+      .replace(/^Interrupted\s*[·:-]?\s*/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!text) return "暂无内容";
+    return text.length > maxLength ? `${text.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…` : text;
+  }
+
+  updateComposerTurnNavigator(tab, state = this.getComposerPdfState(tab)) {
+    const navigator = state?.turnNavigator;
+    const messages = state?.turnNavigatorMessagesEl;
+    if (!navigator?.isConnected || !messages?.isConnected) return;
+    const buttons = Array.from(navigator.querySelectorAll(".paperlib-turn-navigator-item"));
+    if (!buttons.length) return;
+    const anchor = messages.scrollTop + Math.min(messages.clientHeight * 0.34, 180);
+    let activeIndex = 0;
+    for (let index = 0; index < buttons.length; index += 1) {
+      const messageId = buttons[index].dataset.messageId || "";
+      const target = messages.querySelector(`.paper-composer-message-user[data-message-id="${CSS.escape(messageId)}"]`);
+      if (target && target.offsetTop <= anchor) activeIndex = index;
+    }
+    if (messages.scrollHeight - messages.scrollTop - messages.clientHeight < 3) activeIndex = buttons.length - 1;
+    buttons.forEach((button, index) => {
+      const active = index === activeIndex;
+      button.toggleClass?.("is-active", active);
+      if (active) button.setAttribute("aria-current", "step");
+      else button.removeAttribute("aria-current");
+    });
+  }
+
+  showComposerTurnPreview(tab, button, state = this.getComposerPdfState(tab)) {
+    const navigator = state?.turnNavigator;
+    const messages = state?.turnNavigatorMessagesEl;
+    const preview = navigator?.querySelector?.(".paperlib-turn-navigator-preview");
+    if (!navigator || !messages || !preview || !button) return;
+    const messageId = button.dataset.messageId || "";
+    const user = messages.querySelector(`.paper-composer-message-user[data-message-id="${CSS.escape(messageId)}"]`);
+    let assistant = user?.nextElementSibling;
+    while (assistant && !assistant.matches?.(".paper-composer-message-assistant, .paper-composer-message-user")) {
+      assistant = assistant.nextElementSibling;
+    }
+    if (assistant?.matches?.(".paper-composer-message-user")) assistant = null;
+    const title = preview.querySelector(".paperlib-turn-navigator-preview-title");
+    const answer = preview.querySelector(".paperlib-turn-navigator-preview-answer");
+    if (title) title.textContent = this.composerTurnPreviewText(user, 88);
+    if (answer) answer.textContent = this.composerTurnPreviewText(assistant, 180);
+    const host = navigator.closest(".paper-composer-messages-wrapper");
+    const hostRect = host?.getBoundingClientRect?.();
+    const buttonRect = button.getBoundingClientRect();
+    if (hostRect) {
+      const y = Math.max(58, Math.min(hostRect.height - 58, buttonRect.top - hostRect.top + (buttonRect.height / 2)));
+      navigator.style.setProperty("--paperlib-turn-preview-y", `${y}px`);
+      navigator.style.setProperty(
+        "--paperlib-turn-preview-width",
+        `${Math.max(170, Math.min(320, hostRect.width - 58))}px`
+      );
+    }
+    preview.hidden = false;
+  }
+
+  ensureComposerTurnNavigator(tab, state = this.getComposerPdfState(tab)) {
+    const messages = tab?.dom?.messagesEl
+      || tab?.dom?.inputEl?.closest?.(".paper-composer-tab-content")?.querySelector?.(".paper-composer-messages");
+    const wrapper = messages?.closest?.(".paper-composer-messages-wrapper");
+    if (!messages || !wrapper) return;
+    if (state.turnNavigatorMessagesEl && state.turnNavigatorMessagesEl !== messages) {
+      this.cleanupComposerTurnNavigator(tab, state);
+    }
+    const userMessages = Array.from(messages.querySelectorAll(".paper-composer-message-user[data-message-id]"));
+    const signature = userMessages.map((element) => element.dataset.messageId || "").join("\n");
+    if (userMessages.length < 2) {
+      if (state.turnNavigator) this.cleanupComposerTurnNavigator(tab, state);
+      return;
+    }
+    if (state.turnNavigator?.isConnected && state.turnNavigatorSignature === signature) {
+      this.updateComposerTurnNavigator(tab, state);
+      return;
+    }
+    this.cleanupComposerTurnNavigator(tab, state);
+    const navigator = document.createElement("nav");
+    navigator.className = "paperlib-turn-navigator";
+    navigator.setAttribute("aria-label", "当前对话目录");
+    const list = document.createElement("div");
+    list.className = "paperlib-turn-navigator-list";
+    list.style.setProperty("--paperlib-turn-count", String(userMessages.length));
+    userMessages.forEach((message, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "paperlib-turn-navigator-item";
+      button.dataset.messageId = message.dataset.messageId || "";
+      const title = this.composerTurnPreviewText(message, 70);
+      button.setAttribute("aria-label", `第 ${index + 1} 轮：${title}`);
+      button.addEventListener("pointerenter", () => this.showComposerTurnPreview(tab, button, state));
+      button.addEventListener("focus", () => this.showComposerTurnPreview(tab, button, state));
+      const hidePreview = () => {
+        const preview = navigator.querySelector(".paperlib-turn-navigator-preview");
+        if (preview) preview.hidden = true;
+      };
+      button.addEventListener("pointerleave", hidePreview);
+      button.addEventListener("blur", hidePreview);
+      button.addEventListener("click", () => {
+        messages.scrollTo({ top: Math.max(0, message.offsetTop - 8), behavior: "smooth" });
+      });
+      list.append(button);
+    });
+    const preview = document.createElement("section");
+    preview.className = "paperlib-turn-navigator-preview";
+    preview.hidden = true;
+    const previewTitle = document.createElement("strong");
+    previewTitle.className = "paperlib-turn-navigator-preview-title";
+    const previewAnswer = document.createElement("p");
+    previewAnswer.className = "paperlib-turn-navigator-preview-answer";
+    preview.append(previewTitle, previewAnswer);
+    navigator.append(list, preview);
+    wrapper.append(navigator);
+    wrapper.addClass?.("paperlib-turn-navigator-active");
+    state.turnNavigator = navigator;
+    state.turnNavigatorMessagesEl = messages;
+    state.turnNavigatorSignature = signature;
+    state.turnNavigatorScrollHandler = () => {
+      if (state.turnNavigatorFrame) return;
+      state.turnNavigatorFrame = window.requestAnimationFrame(() => {
+        state.turnNavigatorFrame = 0;
+        this.updateComposerTurnNavigator(tab, state);
+      });
+    };
+    messages.addEventListener("scroll", state.turnNavigatorScrollHandler, { passive: true });
+    if (typeof ResizeObserver !== "undefined") {
+      state.turnNavigatorResizeObserver = new ResizeObserver(state.turnNavigatorScrollHandler);
+      state.turnNavigatorResizeObserver.observe(messages);
+    }
+    this.updateComposerTurnNavigator(tab, state);
   }
 
   composerSentPdfDescriptor(attachment, options = {}) {
@@ -11518,6 +11864,17 @@ module.exports = class PaperLibraryPlugin extends Plugin {
         contextRowFallback: false,
         topControlsObserver: null,
         topControlsScheduled: false,
+        turnNavigator: null,
+        turnNavigatorMessagesEl: null,
+        turnNavigatorScrollHandler: null,
+        turnNavigatorResizeObserver: null,
+        turnNavigatorFrame: 0,
+        turnNavigatorSignature: "",
+        paperConversationKey: "",
+        paperConversationPaperId: "",
+        paperConversationTitle: "",
+        paperConversationSourcePath: "",
+        paperConversationSwitching: false,
         voiceRecognition: null,
         linkedContentObserver: null,
         linkedContentObserverRow: null,
@@ -11542,10 +11899,13 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     const wrapper = input?.closest?.(".paper-composer-input-wrapper");
     if (!input || !wrapper) return null;
     const state = this.getComposerPdfState(tab);
+    this.decorateComposerVisibleUserPrompts(tab);
     this.decorateClaudianSentImageCards(tab);
     this.decorateClaudianSentPdfCards(tab);
+    this.ensureComposerTurnNavigator(tab, state);
     this.ensureComposerTopControls(tab, state);
     this.ensureComposerCodexInput(tab, state);
+    this.rememberComposerPaperConversation(tab, state);
     const controller = tab.controllers?.inputController;
     if (controller?.sendMessage && !state.originalSendMessage) {
       const original = controller.sendMessage.bind(controller);
@@ -12503,6 +12863,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
         tab?.paperLibraryPdfState?.topControlsObserver?.disconnect?.();
         tab?.paperLibraryPdfState?.linkedContentObserver?.disconnect?.();
         tab?.paperLibraryPdfState?.voiceRecognition?.abort?.();
+        this.cleanupComposerTurnNavigator(tab);
         this.cleanupComposerUnifiedModelControl(tab);
         this.composerPdfTabs.delete(tab);
         continue;
@@ -14761,6 +15122,11 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       && typeof stored.paperComposerDirectContextBindings === "object"
       && !Array.isArray(stored.paperComposerDirectContextBindings)
       ? stored.paperComposerDirectContextBindings
+      : {};
+    this.settings.paperComposerPaperConversations = stored?.paperComposerPaperConversations
+      && typeof stored.paperComposerPaperConversations === "object"
+      && !Array.isArray(stored.paperComposerPaperConversations)
+      ? stored.paperComposerPaperConversations
       : {};
     this.settings.serpApiKey = String(stored?.serpApiKey || "").trim();
     this.settings.serpApiBackgroundLookup = Boolean(stored?.serpApiBackgroundLookup);

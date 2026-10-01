@@ -230,6 +230,12 @@ assert.ok(main.includes("作为图片添加到 Paper Composer"), "ink context me
 assert.ok(main.includes("addComposerPdfAttachments"), "PDF attachments must be retained in the Composer tray");
 assert.ok(main.includes("sendClaudianMessageWithPdf"), "Composer send must inject the selected PDF mode");
 assert.ok(main.includes("ensureComposerTopControls"), "Composer must expose its settings from the upper navigation row");
+assert.ok(main.includes("ensureComposerTurnNavigator"), "Composer must expose an outline for turns inside the active conversation");
+assert.ok(main.includes('aria-label", "当前对话目录"'), "the turn outline must be announced as the current conversation directory");
+assert.ok(main.includes("activateComposerConversationForPaper"), "each paper must restore its own Composer conversation");
+assert.ok(main.includes("paperComposerPaperConversations: {}"), "paper-to-conversation bindings must be persisted");
+assert.ok(main.includes('this.app.workspace.on("active-leaf-change"'), "switching an already-open paper tab must refresh its bound conversation");
+assert.ok(main.includes("decorateComposerVisibleUserPrompts"), "restored chats must hide injected PDF context from the visible user prompt");
 assert.ok(main.includes("paperlib-composer-settings-btn"), "the upper settings control must have a Paper Library visual treatment");
 assert.ok(main.includes("toggleComposerPdfModeMenu"), "the upper settings control must switch document handling inline");
 assert.ok(main.includes("ensureComposerTabForDocumentSources"), "explicit Ask AI document contexts may still request conversation isolation");
@@ -307,6 +313,7 @@ assert.ok(styles.includes(".paperlib-canvas-toolbar .paperlib-icon-button::after
 assert.ok(!main.includes('paperlib-ai-region-tool paperlib-canvas-tool-color-bar'), "the research region-selection tool must not create a drawing-color bar");
 assert.ok(styles.includes(".paperlib-paper-composer-sent-pdf:hover"), "sent PDF cards must provide hover feedback");
 assert.ok(styles.includes(".paper-composer-messages:has(> .paper-composer-welcome:not(.paper-composer-hidden))"), "only a visible welcome page may suppress the message scrollbar");
+assert.ok(styles.includes(".paperlib-turn-navigator-item.is-active"), "the active turn must be visible in the current-chat outline");
 assert.ok(!styles.includes(".paper-composer-messages:has(> .paper-composer-welcome) {"), "a hidden welcome node must not freeze conversation scrolling");
 assert.ok(styles.includes("overflow-y: clip !important"), "the welcome state must keep its scroll geometry stable while mounting");
 assert.ok(!styles.includes("from { opacity: 0; transform: translateY(14px) scale(.98); }"), "the welcome animation must not enlarge the scrollable overflow");
