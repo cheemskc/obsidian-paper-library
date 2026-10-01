@@ -1297,10 +1297,11 @@
 
 .workspace-leaf-content[data-type="paperlib-paper-composer-view"] .paperlib-turn-navigator {
   position: absolute;
-  inset: 18px auto auto 4px;
+  inset: 50% auto auto 4px;
   z-index: 8;
   width: 26px;
   max-height: calc(100% - 36px);
+  transform: translateY(-50%);
   pointer-events: none;
 }
 
@@ -1434,19 +1435,8 @@
   box-shadow: 0 8px 24px rgb(0 0 0 / 7%);
 }
 
-.workspace-leaf-content[data-type="paperlib-paper-composer-view"] .paper-composer-message-assistant {
-  position: relative;
-  padding-inline-start: 16px;
-}
-
 .workspace-leaf-content[data-type="paperlib-paper-composer-view"] .paper-composer-message-assistant::before {
-  content: "";
-  position: absolute;
-  inset: 14px auto 14px 4px;
-  width: 2px;
-  border-radius: 999px;
-  background: linear-gradient(var(--paperlib-composer-violet), color-mix(in srgb, var(--paperlib-composer-cyan) 45%, transparent));
-  opacity: .58;
+  display: none;
 }
 
 .workspace-leaf-content[data-type="paperlib-paper-composer-view"] .paper-composer-welcome {

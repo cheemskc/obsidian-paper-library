@@ -11382,6 +11382,13 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     return path ? `file:${path}` : "";
   }
 
+  composerConversationIdsForRecord(record) {
+    return [...new Set([
+      String(record?.conversationId || ""),
+      ...(Array.isArray(record?.conversationIds) ? record.conversationIds.map((id) => String(id || "")) : [])
+    ].filter(Boolean))];
+  }
+
   async findComposerConversationForPaper(paper, sourcePath = "") {
     const runtime = this.claudianRuntime;
     const key = this.composerPaperConversationKey(paper, sourcePath);
@@ -11390,16 +11397,19 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       .map((path) => normalizePath(path || ""))
       .filter(Boolean));
     const record = this.settings?.paperComposerPaperConversations?.[key];
-    const rememberedId = String(record?.conversationId || "");
-    if (rememberedId) {
-      await runtime.ensureConversationMetadataLoaded?.([rememberedId]);
-      const remembered = await runtime.getConversationById?.(rememberedId);
-      const linkedPath = normalizePath(remembered?.linkedContentPath || "");
-      const duplicateBinding = Object.entries(this.settings?.paperComposerPaperConversations || {})
-        .some(([otherKey, otherRecord]) => (
-          otherKey !== key && String(otherRecord?.conversationId || "") === rememberedId
-        ));
-      if (remembered && (linkedPath ? paths.has(linkedPath) : !duplicateBinding)) return remembered;
+    const rememberedIds = this.composerConversationIdsForRecord(record);
+    if (rememberedIds.length) {
+      await runtime.ensureConversationMetadataLoaded?.(rememberedIds);
+      for (const rememberedId of rememberedIds) {
+        const remembered = await runtime.getConversationById?.(rememberedId);
+        if (!remembered) continue;
+        const linkedPath = normalizePath(remembered.linkedContentPath || "");
+        const competingBinding = Object.entries(this.settings?.paperComposerPaperConversations || {})
+          .some(([otherKey, otherRecord]) => (
+            otherKey !== key && this.composerConversationIdsForRecord(otherRecord).includes(rememberedId)
+          ));
+        if (linkedPath ? paths.has(linkedPath) : !competingBinding) return remembered;
+      }
     }
     const conversations = await runtime.getConversationList?.() || [];
     return conversations
@@ -11411,16 +11421,22 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     const id = String(conversationId || "");
     if (!id) return null;
     const store = this.settings?.paperComposerPaperConversations;
-    const records = store && typeof store === "object" && !Array.isArray(store)
-      ? Object.values(store)
-        .filter((record) => String(record?.conversationId || "") === id)
-        .sort((left, right) => (Number(right?.updatedAt) || 0) - (Number(left?.updatedAt) || 0))
-      : [];
-    const record = records[0] || null;
     const conversation = this.claudianRuntime?.getCachedConversation?.(id)
       || this.claudianRuntime?.getConversationSync?.(id)
       || null;
-    const sourcePath = normalizePath(record?.sourcePath || conversation?.linkedContentPath || "");
+    const linkedPath = normalizePath(conversation?.linkedContentPath || "");
+    const records = store && typeof store === "object" && !Array.isArray(store)
+      ? Object.values(store)
+        .filter((record) => this.composerConversationIdsForRecord(record).includes(id))
+        .sort((left, right) => {
+          const leftMatches = linkedPath && normalizePath(left?.sourcePath || "") === linkedPath ? 1 : 0;
+          const rightMatches = linkedPath && normalizePath(right?.sourcePath || "") === linkedPath ? 1 : 0;
+          return rightMatches - leftMatches
+            || (Number(right?.updatedAt) || 0) - (Number(left?.updatedAt) || 0);
+        })
+      : [];
+    const record = records[0] || null;
+    const sourcePath = linkedPath || normalizePath(record?.sourcePath || "");
     const paperId = String(record?.paperId || "");
     const paper = (this.settings?.papers || []).find((candidate) => (
       (paperId && String(candidate?.id || "") === paperId)
@@ -11462,27 +11478,55 @@ module.exports = class PaperLibraryPlugin extends Plugin {
   }
 
   rememberComposerPaperConversation(tab, state = tab?.paperLibraryPdfState) {
-    const key = String(state?.paperConversationKey || "");
     const conversationId = String(tab?.conversationId || "");
-    if (!key || !conversationId || state?.paperConversationSwitching) return false;
-    const current = this.settings?.paperComposerPaperConversations?.[key];
-    const sourcePath = normalizePath(state.paperConversationSourcePath || "");
+    if (!conversationId || state?.paperConversationSwitching) return false;
+    const conversation = this.claudianRuntime?.getCachedConversation?.(conversationId)
+      || this.claudianRuntime?.getConversationSync?.(conversationId)
+      || null;
+    const linkedPath = normalizePath(conversation?.linkedContentPath || "");
+    const linkedPaper = linkedPath ? this.findPaperForComposerPath(linkedPath) : null;
+    if (linkedPaper) {
+      state.paperConversationKey = this.composerPaperConversationKey(linkedPaper, linkedPath);
+      state.paperConversationPaperId = String(linkedPaper.id || "");
+      state.paperConversationTitle = String(linkedPaper.title || "");
+      state.paperConversationSourcePath = linkedPath;
+    }
+    const key = String(state?.paperConversationKey || "");
+    const sourcePath = normalizePath(state?.paperConversationSourcePath || linkedPath || "");
+    if (!key || !sourcePath) return false;
     const store = this.settings.paperComposerPaperConversations
       && typeof this.settings.paperComposerPaperConversations === "object"
       && !Array.isArray(this.settings.paperComposerPaperConversations)
       ? { ...this.settings.paperComposerPaperConversations }
       : {};
-    let removedDuplicate = false;
+    let changed = false;
     for (const [otherKey, otherRecord] of Object.entries(store)) {
-      if (otherKey === key || String(otherRecord?.conversationId || "") !== conversationId) continue;
-      delete store[otherKey];
-      removedDuplicate = true;
+      if (otherKey === key) continue;
+      const otherIds = this.composerConversationIdsForRecord(otherRecord);
+      if (!otherIds.includes(conversationId)) continue;
+      const remainingIds = otherIds.filter((id) => id !== conversationId);
+      if (!remainingIds.length) delete store[otherKey];
+      else store[otherKey] = {
+        ...otherRecord,
+        conversationId: remainingIds.includes(String(otherRecord?.conversationId || ""))
+          ? String(otherRecord.conversationId)
+          : remainingIds[0],
+        conversationIds: remainingIds
+      };
+      changed = true;
     }
-    if (!removedDuplicate && current?.conversationId === conversationId && current?.sourcePath === sourcePath) {
+    const current = store[key] || {};
+    const currentIds = this.composerConversationIdsForRecord(current);
+    const conversationIds = [conversationId, ...currentIds.filter((id) => id !== conversationId)];
+    if (!changed
+      && String(current?.conversationId || "") === conversationId
+      && normalizePath(current?.sourcePath || "") === sourcePath
+      && JSON.stringify(currentIds) === JSON.stringify(conversationIds)) {
       return false;
     }
     store[key] = {
       conversationId,
+      conversationIds,
       paperId: String(state.paperConversationPaperId || ""),
       title: String(state.paperConversationTitle || ""),
       sourcePath,
@@ -11492,6 +11536,32 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     void this.saveSettings();
     this.decorateComposerHistoryItems(tab);
     return true;
+  }
+
+  async ensureComposerConversationForCurrentPaper(tab, state = this.getComposerPdfState(tab)) {
+    if (!tab || !state?.paperConversationKey || !state.paperConversationSourcePath
+      || tab.conversationId || state.paperConversationSwitching || state.paperConversationEnsuring) {
+      return false;
+    }
+    const runtime = this.claudianRuntime;
+    if (!runtime?.createConversation) return false;
+    state.paperConversationEnsuring = true;
+    try {
+      const created = await runtime.createConversation({
+        providerId: tab.providerId || undefined,
+        linkedContentPath: normalizePath(state.paperConversationSourcePath)
+      });
+      if (!created?.id) return false;
+      await tab.controllers?.conversationController?.switchTo?.(created.id);
+      this.ensureClaudianPdfBridge(tab);
+      this.rememberComposerPaperConversation(tab, state);
+      return true;
+    } catch (error) {
+      console.warn("Paper Library: failed to bind new Composer conversation to the current paper", error);
+      return false;
+    } finally {
+      state.paperConversationEnsuring = false;
+    }
   }
 
   async activateComposerConversationForPaper(paper, openedFile = null, options = {}) {
@@ -11640,10 +11710,14 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     if (answer) answer.textContent = this.composerTurnPreviewText(assistant, 180);
     const host = navigator.closest(".paper-composer-messages-wrapper");
     const hostRect = host?.getBoundingClientRect?.();
+    const navigatorRect = navigator.getBoundingClientRect();
     const buttonRect = button.getBoundingClientRect();
     if (hostRect) {
       const y = Math.max(58, Math.min(hostRect.height - 58, buttonRect.top - hostRect.top + (buttonRect.height / 2)));
-      navigator.style.setProperty("--paperlib-turn-preview-y", `${y}px`);
+      navigator.style.setProperty(
+        "--paperlib-turn-preview-y",
+        `${y - (navigatorRect.top - hostRect.top)}px`
+      );
       navigator.style.setProperty(
         "--paperlib-turn-preview-width",
         `${Math.max(170, Math.min(320, hostRect.width - 58))}px`
@@ -11945,6 +12019,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
         paperConversationTitle: "",
         paperConversationSourcePath: "",
         paperConversationSwitching: false,
+        paperConversationEnsuring: false,
         voiceRecognition: null,
         linkedContentObserver: null,
         linkedContentObserverRow: null,
@@ -12650,6 +12725,28 @@ module.exports = class PaperLibraryPlugin extends Plugin {
         wrapper.before(row);
       }
       if (button.parentElement !== row) row.append(button);
+    }
+    const newConversationButton = container.querySelector(".paper-composer-new-conversation-btn");
+    if (newConversationButton && !newConversationButton.paperLibraryPaperBindingListener) {
+      newConversationButton.paperLibraryPaperBindingListener = () => {
+        const previousConversationId = String(tab?.conversationId || "");
+        window.setTimeout(async () => {
+          for (let attempt = 0; attempt < 20; attempt += 1) {
+            if (!tab?.conversationId || String(tab.conversationId) !== previousConversationId) break;
+            await new Promise((resolve) => window.setTimeout(resolve, 25));
+          }
+          if (!tab?.conversationId) {
+            await this.ensureComposerConversationForCurrentPaper(tab, state);
+          } else {
+            this.rememberComposerPaperConversation(tab, state);
+          }
+        }, 0);
+      };
+      newConversationButton.addEventListener(
+        "click",
+        newConversationButton.paperLibraryPaperBindingListener,
+        true
+      );
     }
     if (typeof MutationObserver !== "undefined" && state && !state.topControlsObserver) {
       state.topControlsObserver = new MutationObserver(() => {

@@ -235,8 +235,10 @@ assert.ok(main.includes('aria-label", "当前对话目录"'), "the turn outline 
 assert.ok(main.includes("activateComposerConversationForPaper"), "each paper must restore its own Composer conversation");
 assert.ok(main.includes("paperComposerPaperConversations: {}"), "paper-to-conversation bindings must be persisted");
 assert.ok(main.includes("await runtime.createConversation?.({"), "opening an unbound paper must persist a real conversation immediately");
-assert.ok(main.includes("linkedPath ? paths.has(linkedPath) : !duplicateBinding"), "a remembered conversation must still belong to the requested paper");
-assert.ok(main.includes("delete store[otherKey]"), "one Composer conversation id must not remain bound to multiple papers");
+assert.ok(main.includes("conversationIds"), "one paper must be able to retain multiple Composer conversations");
+assert.ok(main.includes("linkedPath ? paths.has(linkedPath) : !competingBinding"), "a remembered conversation must still belong to the requested paper");
+assert.ok(main.includes("remainingIds = otherIds.filter"), "one Composer conversation must not remain bound to multiple papers");
+assert.ok(main.includes("ensureComposerConversationForCurrentPaper"), "a manually-created conversation must inherit the current paper immediately");
 assert.ok(main.includes("decorateComposerHistoryItems"), "conversation history must label each chat with its linked paper");
 assert.ok(main.includes('this.app.workspace.on("active-leaf-change"'), "switching an already-open paper tab must refresh its bound conversation");
 assert.ok(main.includes("decorateComposerVisibleUserPrompts"), "restored chats must hide injected PDF context from the visible user prompt");
@@ -319,6 +321,7 @@ assert.ok(styles.includes(".paperlib-paper-composer-sent-pdf:hover"), "sent PDF 
 assert.ok(styles.includes(".paper-composer-messages:has(> .paper-composer-welcome:not(.paper-composer-hidden))"), "only a visible welcome page may suppress the message scrollbar");
 assert.ok(styles.includes(".paperlib-turn-navigator-item.is-active"), "the active turn must be visible in the current-chat outline");
 assert.ok(styles.includes("flex-direction: column"), "current-chat turns must use compact fixed spacing instead of stretching over the panel height");
+assert.ok(styles.includes('inset: 50% auto auto 4px'), "the compact current-chat directory must be vertically centered");
 assert.ok(!styles.includes(".paper-composer-messages:has(> .paper-composer-welcome) {"), "a hidden welcome node must not freeze conversation scrolling");
 assert.ok(styles.includes("overflow-y: clip !important"), "the welcome state must keep its scroll geometry stable while mounting");
 assert.ok(!styles.includes("from { opacity: 0; transform: translateY(14px) scale(.98); }"), "the welcome animation must not enlarge the scrollable overflow");
