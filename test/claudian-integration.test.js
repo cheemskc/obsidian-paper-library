@@ -297,7 +297,10 @@ assert.ok(!main.includes("hideSettingsOnlyComposerModels"), "selected Kimi model
 assert.ok(main.includes("cleanupComposerUnifiedModelControl"), "the unified model menu must release document listeners with its tab");
 assert.ok(styles.includes("Paper Composer · Codex-style prompt surface"), "Paper Composer must include the Codex-style visual surface");
 assert.ok(styles.includes("button.paperlib-codex-send-btn"), "the Codex-style input must use a circular send button");
-assert.ok(styles.includes("min-height: 116px"), "the Codex-style prompt surface must use the compact height");
+assert.ok(main.includes("resizeComposerPromptInput"), "the Composer prompt must grow with its content instead of reserving a tall empty box");
+assert.ok(main.includes("input.rows = 1"), "the Composer prompt must begin at a compact single-row height");
+assert.ok(styles.includes("min-height: 42px !important") && styles.includes("max-height: min(180px, 28vh) !important"), "the Codex-style prompt surface must stay compact and cap long input growth");
+assert.ok(styles.includes("border-radius: 16px !important"), "the Composer shell must use one restrained outer radius");
 assert.ok(styles.includes("width: min(220px, calc(100vw - 20px))"), "the unified model menu must stay compact in the sidebar");
 assert.ok(main.includes('row.addEventListener("pointerdown"') && main.includes("openSubmenu();"), "submenu navigation must survive Composer toolbar refreshes between pointerdown and click");
 assert.ok(main.includes("activateOnPointerDown = false") && main.includes("pointerHandled = true"), "model and reasoning choices must commit before Composer replaces their menu nodes");

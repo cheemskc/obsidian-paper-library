@@ -12155,12 +12155,24 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     return true;
   }
 
+  resizeComposerPromptInput(input) {
+    if (!input) return;
+    const minHeight = 42;
+    const viewportHeight = input.ownerDocument?.defaultView?.innerHeight || window.innerHeight || 720;
+    const maxHeight = Math.min(180, Math.max(120, Math.round(viewportHeight * 0.28)));
+    input.style.height = "0px";
+    const contentHeight = input.scrollHeight;
+    input.style.height = `${Math.max(minHeight, Math.min(maxHeight, contentHeight))}px`;
+    input.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
+  }
+
   ensureComposerCodexInput(tab, state = this.getComposerPdfState(tab)) {
     const input = tab?.dom?.inputEl;
     const wrapper = input?.closest?.(".paper-composer-input-wrapper");
     const toolbar = wrapper?.querySelector?.(".paper-composer-input-toolbar");
     if (!input || !wrapper || !toolbar) return;
     wrapper.addClass("paperlib-codex-composer-input");
+    input.rows = 1;
     this.ensureComposerUnifiedModelControl(tab, state);
 
     let fileInput = toolbar.querySelector("input.paperlib-codex-file-input");
@@ -12225,7 +12237,10 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     }
 
     if (!input.paperLibraryCodexInputListener) {
-      input.paperLibraryCodexInputListener = () => this.refreshComposerCodexInput(tab);
+      input.paperLibraryCodexInputListener = () => {
+        this.resizeComposerPromptInput(input);
+        this.refreshComposerCodexInput(tab);
+      };
       input.addEventListener("input", input.paperLibraryCodexInputListener);
     }
     const permission = toolbar.querySelector(".paper-composer-permission-toggle");
@@ -12665,6 +12680,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     const wrapper = input?.closest?.(".paper-composer-input-wrapper");
     const sendButton = wrapper?.querySelector?.(".paperlib-codex-send-btn");
     if (!input || !sendButton) return;
+    this.resizeComposerPromptInput(input);
     const streaming = Boolean(tab?.state?.isStreaming);
     const state = this.getComposerPdfState(tab);
     const hasImages = Boolean(tab?.ui?.imageContextManager?.hasImages?.());
