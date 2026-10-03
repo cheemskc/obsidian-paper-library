@@ -1131,6 +1131,8 @@ const DEFAULT_SETTINGS = {
   standardTableColumnWidths: {},
   standardTypeFilters: [],
   detailTabOrder: PAPER_DETAIL_TABS.map((tab) => tab.id),
+  translationMethod: "composer",
+  translationModel: null,
   doubleClickOpenMode: "workspace",
   jcrRankCache: {},
   jcrRankCacheVersion: "showjcr-jcr2025-if",
@@ -5419,11 +5421,45 @@ class PaperLibraryView extends ItemView {
       scroll.scrollTop = 0;
     };
     let draggedTab = null;
+    let placeholder = null;
     let suppressClickUntil = 0;
+    const finishDrag = () => {
+      draggedTab?.removeClass("is-dragging");
+      placeholder?.remove();
+      placeholder = null;
+      draggedTab = null;
+      tabs.removeClass("is-reordering");
+      suppressClickUntil = Date.now() + 200;
+    };
     const saveOrder = () => {
       this.plugin.settings.detailTabOrder = [...tabs.querySelectorAll("[data-detail-tab]")].map((button) => button.dataset.detailTab);
       void this.plugin.saveSettings().catch(() => new Notice("按钮顺序保存失败，请重试"));
     };
+    tabs.addEventListener("dragover", (event) => {
+      if (!draggedTab || !placeholder) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = "move";
+      const candidates = [...tabs.querySelectorAll("[data-detail-tab]")].filter((el) => el !== draggedTab);
+      const before = candidates.find((el) => {
+        const rect = el.getBoundingClientRect();
+        return event.clientX < rect.left + rect.width / 2;
+      });
+      // The placeholder occupies a full slot, so adjacent icons make room.
+      if (before) tabs.insertBefore(placeholder, before);
+      else tabs.appendChild(placeholder);
+      const bounds = tabs.getBoundingClientRect();
+      if (event.clientX < bounds.left + 20) tabs.scrollLeft -= 12;
+      if (event.clientX > bounds.right - 20) tabs.scrollLeft += 12;
+    });
+    tabs.addEventListener("drop", (event) => {
+      if (!draggedTab || !placeholder) return;
+      event.preventDefault();
+      event.stopPropagation();
+      tabs.insertBefore(draggedTab, placeholder);
+      finishDrag();
+      saveOrder();
+    });
     const createTab = (icon, label, tab) => {
       const button = iconButton(tabs, icon, label, () => {
         if (Date.now() > suppressClickUntil) switchDetailTab(tab);
@@ -5434,29 +5470,21 @@ class PaperLibraryView extends ItemView {
         draggedTab = button;
         event.dataTransfer.setData("application/x-paperlib-detail-tab", tab);
         event.dataTransfer.effectAllowed = "move";
-        button.addClass("is-dragging");
+        const rect = button.getBoundingClientRect();
+        placeholder = tabs.ownerDocument.createElement("span");
+        placeholder.className = "paperlib-detail-tab-placeholder";
+        placeholder.style.width = `${rect.width}px`;
+        placeholder.style.height = `${rect.height}px`;
+        placeholder.setAttribute("aria-hidden", "true");
+        // Let the browser capture the drag image before taking the source out of flow.
+        tabs.ownerDocument.defaultView.requestAnimationFrame(() => {
+          if (draggedTab !== button || !placeholder) return;
+          tabs.insertBefore(placeholder, button);
+          button.addClass("is-dragging");
+          tabs.addClass("is-reordering");
+        });
       });
-      button.addEventListener("dragover", (event) => {
-        if (!draggedTab || draggedTab === button) return;
-        event.preventDefault();
-        event.stopPropagation();
-        event.dataTransfer.dropEffect = "move";
-        tabs.querySelectorAll(".is-drop-target").forEach((el) => el.removeClass("is-drop-target"));
-        button.addClass("is-drop-target");
-      });
-      button.addEventListener("drop", (event) => {
-        if (!draggedTab || draggedTab === button) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const ordered = [...tabs.children];
-        tabs.insertBefore(draggedTab, ordered.indexOf(draggedTab) < ordered.indexOf(button) ? button.nextSibling : button);
-        saveOrder();
-      });
-      button.addEventListener("dragend", () => {
-        draggedTab = null;
-        suppressClickUntil = Date.now() + 200;
-        tabs.querySelectorAll("button").forEach((el) => el.classList.remove("is-dragging", "is-drop-target"));
-      });
+      button.addEventListener("dragend", finishDrag);
       button.addEventListener("keydown", (event) => {
         if (!event.altKey || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
         event.preventDefault();
@@ -5490,15 +5518,15 @@ class PaperLibraryView extends ItemView {
       const ranks = infoHeader.createDiv({ cls: "paperlib-detail-rankings" });
       this.renderVenueRankPills(ranks, paper);
     }
-    infoHeader.createEl("h1", { cls: "paperlib-detail-title", text: paper.title });
-    this.renderPaperTranslation(infoHeader, paper, "title");
+    const titleText = infoHeader.createEl("h1", { cls: "paperlib-detail-title", text: paper.title });
+    this.renderPaperTranslation(infoHeader, paper, "title", titleText);
     infoHeader.createDiv({ cls: "paperlib-detail-authors", text: paper.authors.join(" · ") });
 
     const abstractBlock = scroll.createDiv({ cls: "paperlib-abstract" });
     const abstractTitle = abstractBlock.createDiv({ cls: "paperlib-abstract-title" });
     abstractTitle.createEl("h4", { text: "Abstract" });
     const abstractText = abstractBlock.createEl("p", { text: paper.abstract || "No abstract yet." });
-    if (paper.abstract) this.renderPaperTranslation(abstractBlock, paper, "abstract");
+    if (paper.abstract) this.renderPaperTranslation(abstractBlock, paper, "abstract", abstractText);
     const isExpanded = this.plugin.expandedAbstractIds?.has(paper.id);
     abstractText.toggleClass("is-expanded", Boolean(isExpanded));
     if (paper.abstract) {
@@ -5590,35 +5618,53 @@ class PaperLibraryView extends ItemView {
     if (paper.arxiv) this.createIdentifier(identifiers, "arXiv", paper.arxiv, `https://arxiv.org/abs/${paper.arxiv}`);
   }
 
-  renderPaperTranslation(parent, paper, field) {
+  renderPaperTranslation(parent, paper, field, textEl) {
     if (!String(paper[field] || "").trim()) return;
     const host = parent.createDiv({ cls: "paperlib-translation", attr: { "data-translation-field": field } });
     const actions = host.createDiv({ cls: "paperlib-translation-actions" });
     const button = actions.createEl("button", { attr: { type: "button" } });
+    const retry = actions.createEl("button", { text: "重新翻译", attr: { type: "button" } });
     const cancel = actions.createEl("button", { text: "取消", attr: { type: "button" } });
     const status = host.createDiv({ cls: "paperlib-translation-status", attr: { role: "status" } });
-    const output = host.createEl("p", { cls: "paperlib-translation-text" });
+    const key = `${paper.id}:${field}`;
+    this.plugin.translationOriginalFields ||= new Set();
     let observedTask = null;
     const render = () => {
       const cached = this.plugin.getPaperTranslation(paper, field);
-      const task = this.plugin.paperTranslationTasks?.get(`${paper.id}:${field}`);
-      button.textContent = task ? "翻译中…" : cached ? "重新翻译" : field === "title" ? "翻译标题" : "翻译摘要";
+      const task = this.plugin.paperTranslationTasks?.get(key);
+      const showTranslation = cached && !this.plugin.translationOriginalFields.has(key);
+      button.textContent = task ? "翻译中…" : cached ? showTranslation ? "显示原文" : "显示译文" : field === "title" ? "翻译标题" : "翻译摘要";
       button.disabled = Boolean(task);
+      retry.hidden = !cached || Boolean(task);
       cancel.hidden = !task;
       host.setAttribute("aria-busy", String(Boolean(task)));
-      output.textContent = cached?.text || "";
-      output.hidden = !cached;
+      textEl.textContent = showTranslation ? cached.text : paper[field];
       if (task && observedTask !== task) {
         observedTask = task;
         status.textContent = "";
-        task.promise.catch((error) => {
+        task.promise.then(() => this.plugin.translationOriginalFields.delete(key)).catch((error) => {
           if (host.isConnected) status.textContent = error.message || "翻译失败，请重试";
         }).finally(() => { if (host.isConnected) render(); });
       }
     };
     button.addEventListener("click", () => {
       status.textContent = "";
-      void this.plugin.translatePaperField(paper.id, field).catch(() => {});
+      if (this.plugin.getPaperTranslation(paper, field)) {
+        if (this.plugin.translationOriginalFields.has(key)) this.plugin.translationOriginalFields.delete(key);
+        else this.plugin.translationOriginalFields.add(key);
+        render();
+        return;
+      }
+      void this.plugin.translatePaperField(paper.id, field).catch((error) => {
+        if (host.isConnected) status.textContent = error.message || "翻译失败，请重试";
+      });
+      render();
+    });
+    retry.addEventListener("click", () => {
+      status.textContent = "";
+      void this.plugin.translatePaperField(paper.id, field).catch((error) => {
+        if (host.isConnected) status.textContent = error.message || "翻译失败，请重试";
+      });
       render();
     });
     cancel.addEventListener("click", () => this.plugin.paperTranslationTasks?.get(`${paper.id}:${field}`)?.cancel());
@@ -9320,6 +9366,84 @@ class PaperLibrarySettingTab extends PluginSettingTab {
     this.updateMessage = "";
   }
 
+  preserveSettingsPosition(render) {
+    if (this.settingsPreserveDepth) return render();
+    const root = this.containerEl;
+    if (!root.isConnected || !root.childElementCount) return render();
+    this.settingsPreserveDepth = true;
+    const scrolls = [];
+    for (let el = root; el; el = el.parentElement) {
+      if (el === root || el.scrollHeight > el.clientHeight) scrolls.push([el, el.scrollTop, el.scrollLeft]);
+    }
+    const detailKey = (el) => `${el.className}:${el.querySelector(":scope > summary")?.textContent}`;
+    const expanded = new Map([...root.querySelectorAll("details")].map((el) => [detailKey(el), el.open]));
+    const active = root.ownerDocument.activeElement;
+    const focusedRow = active?.closest?.(".setting-item");
+    const focusName = root.contains(active) ? focusedRow?.querySelector(".setting-item-name")?.textContent : null;
+    const focusIndex = focusedRow ? [...focusedRow.querySelectorAll("input,select,textarea,button")].indexOf(active) : -1;
+    const generation = this.settingsRenderGeneration = (this.settingsRenderGeneration || 0) + 1;
+    const restore = () => {
+      if (!root.isConnected || generation !== this.settingsRenderGeneration) return;
+      root.querySelectorAll("details").forEach((el) => {
+        const open = expanded.get(detailKey(el));
+        if (open !== undefined && el.open !== open) el.open = open;
+      });
+      if (focusName && !active.isConnected) {
+        const row = [...root.querySelectorAll(".setting-item")].find((el) => el.querySelector(".setting-item-name")?.textContent === focusName);
+        row?.querySelectorAll("input,select,textarea,button")[focusIndex]?.focus({ preventScroll: true });
+      }
+      scrolls.forEach(([el, top, left]) => { el.scrollTop = top; el.scrollLeft = left; });
+    };
+    // Restore in the same layout transaction; a later frame could override a
+    // user's new scroll or the initial settings window positioning.
+    const finish = restore;
+    try {
+      const result = render();
+      if (result?.then) return result.finally(finish);
+      finish();
+      return result;
+    } catch (error) { finish(); throw error; }
+    finally { this.settingsPreserveDepth = false; }
+  }
+
+  renderTranslationSettings(container) {
+    container.createEl("h3", { text: "标题与摘要翻译" });
+    const modelHost = container.createDiv();
+    const renderModel = () => {
+      modelHost.empty();
+      if (this.plugin.settings.translationMethod !== "model") return;
+      const runtime = this.plugin.claudianRuntime;
+      const options = runtime && this.plugin.paperTranslationBridge?.models(runtime) || [];
+      const selected = this.plugin.settings.translationModel;
+      const value = selected ? JSON.stringify(selected) : "";
+      new Setting(modelHost).setName("翻译模型")
+        .setDesc("复用已启用的模型与账号，独立于聊天模型。修改后可在信息页点击重新翻译。")
+        .addDropdown((dropdown) => {
+          dropdown.addOption("", "请选择模型");
+          options.forEach((option) => dropdown.addOption(JSON.stringify({ providerId: option.providerId, model: option.model }), option.label));
+          if (value && ![...dropdown.selectEl.options].some((option) => option.value === value)) {
+            dropdown.addOption(value, `${selected.model}（当前不可用）`);
+          }
+          dropdown.setValue(value).onChange(async (next) => {
+            this.plugin.settings.translationModel = next ? JSON.parse(next) : null;
+            await this.plugin.saveSettings();
+          });
+        });
+      if (!options.length) modelHost.createEl("p", { cls: "setting-item-description", text: "请先在下方 Agent、模型与账号设置中启用模型。" });
+    };
+    const method = new Setting(container).setName("翻译方式")
+      .setDesc("点击信息页按钮才会发送标题或摘要。译文在原位置显示，再次点击可切回原文；原始元数据不变。")
+      .addDropdown((dropdown) => dropdown.addOption("composer", "跟随 Composer 当前模型").addOption("model", "指定翻译模型")
+        .setValue(this.plugin.settings.translationMethod === "model" ? "model" : "composer")
+        .onChange(async (value) => {
+          this.plugin.settings.translationMethod = value;
+          await this.plugin.saveSettings();
+          this.preserveSettingsPosition(renderModel);
+        }));
+    method.settingEl.after(modelHost);
+    renderModel();
+  }
+
   normalizeEmbeddedComposerSurface(root) {
     if (!root || typeof document === "undefined") return;
     // Paper Composer is the only user-facing surface. The embedded runtime's
@@ -9367,7 +9491,6 @@ class PaperLibrarySettingTab extends PluginSettingTab {
     if (!host) return;
     this.composerSettingsObserver?.disconnect?.();
     this.composerSettingsObserver = null;
-    host.empty();
     const settingTab = this.plugin.claudianSettingTab;
     if (!settingTab || typeof settingTab.renderSettings !== "function") {
       host.createEl("p", {
@@ -9379,6 +9502,12 @@ class PaperLibrarySettingTab extends PluginSettingTab {
       return;
     }
     try {
+      // Embedded controls call renderSettings directly too, bypassing display().
+      if (!settingTab.paperLibraryPreservedRender) {
+        const original = settingTab.renderSettings.bind(settingTab);
+        settingTab.renderSettings = (...args) => this.preserveSettingsPosition(() => original(...args));
+        settingTab.paperLibraryPreservedRender = true;
+      }
       await Promise.resolve(settingTab.renderSettings(host));
       this.normalizeEmbeddedComposerSurface(host);
       if (typeof MutationObserver !== "undefined") {
@@ -9541,6 +9670,10 @@ class PaperLibrarySettingTab extends PluginSettingTab {
   }
 
   display() {
+    return this.preserveSettingsPosition(() => this.renderSettingsContents());
+  }
+
+  renderSettingsContents() {
     this.composerSettingsObserver?.disconnect?.();
     this.composerSettingsObserver = null;
     const { containerEl } = this;
@@ -9798,6 +9931,7 @@ class PaperLibrarySettingTab extends PluginSettingTab {
     });
     const composerCliSettings = composerCard.createDiv({ cls: "paperlib-composer-cli-settings" });
     this.renderPaperComposerCliSettings(composerCliSettings);
+    this.renderTranslationSettings(containerEl);
     const composerSettingsDetails = composerCard.createEl("details", {
       cls: "paperlib-composer-embedded-settings"
     });
@@ -9812,6 +9946,7 @@ class PaperLibrarySettingTab extends PluginSettingTab {
       cls: "paperlib-composer-embedded-settings__host"
     });
     composerSettingsDetails.addEventListener("toggle", () => {
+      if (this.composerSettingsExpanded === composerSettingsDetails.open) return;
       this.composerSettingsExpanded = composerSettingsDetails.open;
       if (composerSettingsDetails.open) void this.renderEmbeddedComposerSettings();
     });
@@ -10685,8 +10820,14 @@ module.exports = class PaperLibraryPlugin extends Plugin {
       "paperComposerObsidianComponents", source + `
 // Adapter for the pinned Composer runtime: passive, ephemeral text requests.
 module.exports.paperLibraryTranslationBridge = {
-  async create(runtime) {
-    const selected = runtime.settings.lastSelectedChatModel;
+  models(runtime) {
+    return HGe.getRegisteredProviderIds().filter(id => HGe.isEnabled(id, runtime.settings)).flatMap(providerId =>
+      HGe.getChatUIConfig(providerId).getModelOptions(runtime.settings).map(option => ({
+        providerId, model: option.value, label: HGe.getProviderDisplayName(providerId) + " · " + option.label
+      })));
+  },
+  async create(runtime, selection = null) {
+    const selected = selection || runtime.settings.lastSelectedChatModel;
     const model = selected?.model || runtime.settings.model;
     const providerId = selected?.providerId || HGe.resolveProviderForModel(model, runtime.settings, { onlyEnabledProviders: true });
     if (!HGe.isEnabled(providerId, runtime.settings)) throw new Error("请先在 Composer 中启用并选择模型");
@@ -10716,6 +10857,9 @@ module.exports.paperLibraryTranslationBridge = {
     const paper = this.settings.papers.find((item) => item.id === paperId);
     const source = ["title", "abstract"].includes(field) ? String(paper?.[field] || "").trim() : "";
     if (!source) return Promise.reject(new Error("没有可翻译的内容"));
+    const selection = this.settings.translationMethod === "model" && this.settings.translationModel
+      ? { ...this.settings.translationModel } : null;
+    if (this.settings.translationMethod === "model" && !selection?.model) return Promise.reject(new Error("请先在设置中选择翻译模型"));
     let controller;
     let cancelled = false;
     let rejectCancellation;
@@ -10734,7 +10878,7 @@ module.exports.paperLibraryTranslationBridge = {
       });
       const runtime = await this.paperTranslationRuntimeReady;
       if (cancelled) throw new Error("已取消翻译");
-      const prepared = await this.paperTranslationBridge.create(runtime);
+      const prepared = await this.paperTranslationBridge.create(runtime, selection && { ...selection });
       controller = prepared.controller;
       try {
         if (cancelled) throw new Error("已取消翻译");

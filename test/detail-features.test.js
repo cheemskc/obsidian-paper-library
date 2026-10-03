@@ -14,7 +14,8 @@ function fixture() {
   plugin.saveSettings = async () => { plugin.saved++; };
   plugin.loadEmbeddedClaudian = async () => ({});
   const controllers = [];
-  plugin.paperTranslationBridge = { create: async () => {
+  plugin.paperTranslationBridge = { create: async (_runtime, selection) => {
+    plugin.lastSelection = selection;
     let resolve;
     const response = new Promise((done) => { resolve = done; });
     const controller = {
@@ -76,5 +77,17 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
   deleted.controllers[0].resolve("已删除文献的标题");
   await assert.rejects(deletedRequest, /原文已更改/);
   assert.equal(deleted.plugin.saved, 0);
+
+  const configured = fixture();
+  configured.plugin.settings.translationMethod = "model";
+  await assert.rejects(configured.plugin.translatePaperField("one", "title"), /选择翻译模型/);
+  configured.plugin.settings.translationModel = { providerId: "example", model: "translator-a" };
+  const customRequest = configured.plugin.translatePaperField("one", "title");
+  configured.plugin.settings.translationModel.model = "translator-b";
+  await tick();
+  assert.equal(configured.plugin.lastSelection.model, "translator-a", "request uses a frozen model selection");
+  configured.controllers[0].resolve("指定模型的译文");
+  await customRequest;
+  assert.equal(configured.plugin.getPaperTranslation(configured.paper, "title").text, "指定模型的译文");
   console.log("Paper detail translation lifecycle tests passed.");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
