@@ -1529,15 +1529,83 @@ function sequenceDice(left, right, size = 2) {
 }
 
 function sequenceOrderScore(leftSequence, rightSequence) {
-  const rows = Array.from({ length: leftSequence.length + 1 }, () => Array(rightSequence.length + 1).fill(0));
+  // LCS only needs the previous row. Avoid allocating a matrix for every
+  // comparison (especially the character-level comparison of Chinese titles).
+  if (leftSequence.length < rightSequence.length) [leftSequence, rightSequence] = [rightSequence, leftSequence];
+  const row = new Uint32Array(rightSequence.length + 1);
   for (let leftIndex = 1; leftIndex <= leftSequence.length; leftIndex += 1) {
+    let diagonal = 0;
     for (let rightIndex = 1; rightIndex <= rightSequence.length; rightIndex += 1) {
-      rows[leftIndex][rightIndex] = leftSequence[leftIndex - 1] === rightSequence[rightIndex - 1]
-        ? rows[leftIndex - 1][rightIndex - 1] + 1
-        : Math.max(rows[leftIndex - 1][rightIndex], rows[leftIndex][rightIndex - 1]);
+      const previous = row[rightIndex];
+      row[rightIndex] = leftSequence[leftIndex - 1] === rightSequence[rightIndex - 1]
+        ? diagonal + 1 : Math.max(previous, row[rightIndex - 1]);
+      diagonal = previous;
     }
   }
-  return rows[leftSequence.length][rightSequence.length] / Math.max(leftSequence.length, rightSequence.length, 1);
+  return row[rightSequence.length] / Math.max(leftSequence.length, rightSequence.length, 1);
+}
+
+function createRecommendationLibraryMatcher(library) {
+  const dois = new Set();
+  const titles = new Set();
+  const describe = (title) => {
+    const characters = Array.from(title.replace(/\s+/g, ""));
+    const counts = new Map();
+    for (const character of characters) counts.set(character, (counts.get(character) || 0) + 1);
+    return { title, cjk: hasCjkText(title), tokens: new Set(title.split(" ").filter((token) => token.length > 1)),
+      compact: characters.join(""), length: characters.length, counts };
+  };
+  const descriptors = library.map((paper) => {
+    const doi = normalizeDoiInput(paper.doi || "");
+    const title = normalizeTitleForMatch(paper.title || "");
+    if (doi) dois.add(doi);
+    if (title) titles.add(title);
+    return describe(title);
+  });
+  const results = new Map();
+  return (item) => {
+    const doi = normalizeDoiInput(item.doi || "");
+    const title = normalizeTitleForMatch(item.title || "");
+    if ((doi && dois.has(doi)) || (title && titles.has(title))) return true;
+    if (!title) return false;
+    // Matching is title-only after the DOI fast path, so repeated relation
+    // candidates from different seeds share this result within one calculation.
+    if (results.has(title)) return results.get(title);
+    const candidate = describe(title);
+    const tokens = candidate.tokens;
+    const found = descriptors.some((descriptor) => {
+      if (!descriptor.title) return false;
+      let common = 0;
+      for (const token of tokens) if (descriptor.tokens.has(token)) common += 1;
+      const tokenScore = 2 * common / Math.max(1, tokens.size + descriptor.tokens.size);
+      const tokenUpper = 0.75 + 0.25 * tokenScore;
+      if (tokenUpper < 0.96) {
+        if (!candidate.cjk && !descriptor.cjk) return false;
+        // Character LCS cannot exceed the multiset intersection. Matching
+        // bigrams also cannot exceed that count. Keep the containment branch
+        // as well, so Chinese/bilingual near-duplicates retain their semantics.
+        let shared = 0;
+        for (const [character, count] of candidate.counts) shared += Math.min(count, descriptor.counts.get(character) || 0);
+        const longest = Math.max(candidate.length, descriptor.length, 1);
+        const ratio = Math.min(candidate.length, descriptor.length) / longest;
+        const orderUpper = 0.98 * shared / longest;
+        const diceUpper = 2 * shared / (Math.max(1, candidate.length - 1) + Math.max(1, descriptor.length - 1));
+        const containment = ratio >= 0.78
+          && (candidate.compact.includes(descriptor.compact) || descriptor.compact.includes(candidate.compact))
+          ? 0.82 + 0.18 * ratio : 0;
+        if (Math.max(orderUpper, diceUpper, containment) < 0.96) return false;
+      }
+      return titleSimilarity(descriptor.title, title) >= 0.96;
+    });
+    results.set(title, found);
+    return found;
+  };
+}
+
+function setBoundedCacheEntry(cache, key, value, limit) {
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > limit) cache.delete(cache.keys().next().value);
 }
 
 function titleSimilarity(left, right) {
@@ -2536,12 +2604,14 @@ class PaperLibraryView extends ItemView {
   getIcon() { return "library"; }
 
   async onOpen() {
+    this.closed = false;
     this.containerEl.addClass("paperlib-view");
     this.contentEl?.addClass?.("paperlib-view-content");
     this.render();
   }
 
   async onClose() {
+    this.closed = true;
     if (this.clickTimer) window.clearTimeout(this.clickTimer);
     if (this.mobileDetailTimer) window.clearTimeout(this.mobileDetailTimer);
     this.mobileDetailTimer = null;
@@ -3067,7 +3137,10 @@ class PaperLibraryView extends ItemView {
     }
     host.empty();
     const query = this.tagCloudQuery.toLocaleLowerCase();
-    const tagStats = this.plugin.getAllTags().map((tag) => ({
+    const allTags = this.plugin.getAllTags();
+    const liveTags = new Set(allTags);
+    for (const tag of this.tagCloudPositions.keys()) if (!liveTags.has(tag)) this.tagCloudPositions.delete(tag);
+    const tagStats = allTags.map((tag) => ({
       tag,
       count: this.plugin.settings.papers.filter((paper) => (paper.tags || []).includes(tag)).length
     })).filter(({ tag }) => !query || tag.toLocaleLowerCase().includes(query));
@@ -3254,7 +3327,7 @@ class PaperLibraryView extends ItemView {
           this.tagCloudFrame = null;
           return;
         }
-        if (!activeInteractions) {
+        if (!activeInteractions && (typeof stage.isShown !== "function" || stage.isShown())) {
           rotateCloud(0.0026, 0);
           paint();
         }
@@ -4097,8 +4170,8 @@ class PaperLibraryView extends ItemView {
 
     if (model.recommendations.length < 4) {
       void this.plugin.refreshDailyRecommendations(false).then((changed) => {
-        if (changed && this.scope === "daily") this.render();
-      });
+        if (changed && !this.closed && this.containerEl?.isConnected && this.scope === "daily") this.render();
+      }).catch((error) => console.warn("Paper Library: daily recommendation refresh unavailable", error));
     }
   }
 
@@ -4866,9 +4939,10 @@ class PaperLibraryView extends ItemView {
     const closeOnEscape = (event) => {
       if (event.key === "Escape") this.closeFavoriteColorPicker();
     };
-    window.setTimeout(() => document.addEventListener("pointerdown", closeOnOutside, true), 0);
+    const listenerTimer = window.setTimeout(() => document.addEventListener("pointerdown", closeOnOutside, true), 0);
     document.addEventListener("keydown", closeOnEscape, true);
     this.favoriteColorPickerCleanup = () => {
+      window.clearTimeout(listenerTimer);
       document.removeEventListener("pointerdown", closeOnOutside, true);
       document.removeEventListener("keydown", closeOnEscape, true);
     };
@@ -6199,6 +6273,11 @@ class PaperResearchWorkspaceView extends ItemView {
   }
 
   async onClose() {
+    this.pdfRenderToken += 1;
+    void this.pdfLoadingTask?.destroy?.().catch(() => {});
+    this.pdfLoadingTask = null;
+    this.pdfFrameDragCleanup?.();
+    this.pdfFrameDragCleanup = null;
     if (this.longPressTimer) window.clearTimeout(this.longPressTimer);
     if (this.zoomSaveTimer) window.clearTimeout(this.zoomSaveTimer);
     this.finishExcerptDrag(null, true);
@@ -6637,6 +6716,7 @@ class PaperResearchWorkspaceView extends ItemView {
     handle.addEventListener("pointerdown", (event) => {
       if (event.button !== 0 || event.target.closest("button")) return;
       event.preventDefault();
+      this.pdfFrameDragCleanup?.();
       const startX = event.clientX;
       const startY = event.clientY;
       const originX = Number(frameState.x || 0);
@@ -6649,19 +6729,29 @@ class PaperResearchWorkspaceView extends ItemView {
         frame.style.top = `${frameState.y}px`;
         this.sourceLinkPreview?.update?.();
       };
-      const up = () => {
+      const cleanup = () => {
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", cancel);
         frame.removeClass("is-dragging");
+        if (this.pdfFrameDragCleanup === cleanup) this.pdfFrameDragCleanup = null;
+      };
+      const up = () => {
+        cleanup();
         void this.plugin.persistResearchWorkspace(paper, false);
       };
+      const cancel = () => cleanup();
+      this.pdfFrameDragCleanup = cleanup;
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up, { once: true });
+      window.addEventListener("pointercancel", cancel, { once: true });
     });
   }
 
   async renderPdfDocument(host, paper, workspace) {
     const token = ++this.pdfRenderToken;
+    void this.pdfLoadingTask?.destroy?.().catch(() => {});
+    this.pdfLoadingTask = null;
     const pdfPath = normalizePath(paper.pdfPath || "");
     const loading = host.createDiv({ cls: "paperlib-pdf-loading" });
     setPaperlibIcon(loading.createSpan(), "loader-circle");
@@ -6672,7 +6762,17 @@ class PaperResearchWorkspaceView extends ItemView {
       if (!this.pdfCache || this.pdfCache.path !== pdfPath) {
         try { await this.pdfCache?.document?.destroy?.(); } catch (_) {}
         const [pdfjs, buffer] = await Promise.all([loadPdfJs(), this.app.vault.readBinary(file)]);
-        const document = await pdfjs.getDocument({ data: new Uint8Array(buffer.slice(0)) }).promise;
+        if (token !== this.pdfRenderToken || !host.isConnected) return;
+        let task;
+        const document = await this.plugin.createPdfDocument(pdfjs, new Uint8Array(buffer.slice(0)), (loadingTask) => {
+          task = loadingTask;
+          this.pdfLoadingTask = loadingTask;
+        });
+        if (this.pdfLoadingTask === task) this.pdfLoadingTask = null;
+        if (token !== this.pdfRenderToken || !host.isConnected) {
+          await document.destroy?.();
+          return;
+        }
         this.pdfCache = { path: pdfPath, pdfjs, document, pages: new Map() };
       }
       if (token !== this.pdfRenderToken || !host.isConnected) return;
@@ -9366,6 +9466,11 @@ class PaperLibrarySettingTab extends PluginSettingTab {
     this.updateMessage = "";
   }
 
+  hide() {
+    this.composerSettingsObserver?.disconnect?.();
+    this.composerSettingsObserver = null;
+  }
+
   preserveSettingsPosition(render) {
     if (this.settingsPreserveDepth) return render();
     const root = this.containerEl;
@@ -10475,6 +10580,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
   }
 
   async onload() {
+    this.disposed = false;
     this.removeLegacyComposerSettingTabs();
     this.registerPaperComposerIcon();
     // Paper AI was a temporary standalone transport. Upgrades must also
@@ -10702,6 +10808,8 @@ module.exports = class PaperLibraryPlugin extends Plugin {
   }
 
   onunload() {
+    this.disposed = true;
+    for (const task of this.pdfDocumentTasks || []) void task.destroy().catch(() => {});
     for (const task of this.paperTranslationTasks?.values?.() || []) task.cancel();
     this.stopExtensionServer();
     this.composerPaperSyncRevision += 1;
@@ -10709,21 +10817,17 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     this.mineruActiveTasks?.clear?.();
     this.composerMountObserver?.disconnect?.();
     this.composerMountObserver = null;
+    if (this.composerMountTimer) window.clearTimeout(this.composerMountTimer);
+    this.composerMountTimer = null;
+    this.closeComposerPdfModeMenus();
+    this.paperLibrarySettingTab?.composerSettingsObserver?.disconnect?.();
     document.body?.removeClass?.("paperlib-paperglass-active");
     document.body?.removeClass?.("paperlib-gallery-active");
     document.body?.removeClass?.("paperlib-blueprint-active");
     this.customAppearanceStyleEl?.remove?.();
     this.customAppearanceStyleEl = null;
     for (const tab of this.composerPdfTabs || []) {
-      const state = tab?.paperLibraryPdfState;
-      if (state?.originalSendMessage && tab.controllers?.inputController) {
-        tab.controllers.inputController.sendMessage = state.originalSendMessage;
-      }
-      state?.topControlsObserver?.disconnect?.();
-      this.cleanupComposerTurnNavigator(tab, state);
-      this.cleanupComposerUnifiedModelControl(tab, state);
-      state?.strip?.remove?.();
-      delete tab.paperLibraryPdfState;
+      this.cleanupComposerPdfTab(tab);
     }
     this.composerPdfTabs?.clear?.();
     try { this.claudianRuntime?.unload?.(); }
@@ -10747,13 +10851,7 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     this.pdfInkContextMenuCleanup?.();
     this.pdfInkContextMenuCleanup = null;
     this.nativePdfToolbarObserver?.disconnect();
-    (this.nativePdfBindingList || []).forEach(({ container, pointerDown, pointerUp, contextMenu, dragStart, click }) => {
-      container.removeEventListener("pointerdown", pointerDown, true);
-      container.removeEventListener("pointerup", pointerUp, true);
-      container.removeEventListener("contextmenu", contextMenu, true);
-      container.removeEventListener("dragstart", dragStart, true);
-      container.removeEventListener("click", click, true);
-    });
+    (this.nativePdfBindingList || []).forEach((binding) => this.cleanupNativePdfBinding(binding));
     this.nativePdfBindingList = [];
     document.querySelectorAll(".paperlib-native-pdf-tools").forEach((element) => element.remove());
     document.querySelectorAll(".paperlib-pdf-figure-drag-zone, .paperlib-pdf-figure-drag-preview")
@@ -10771,6 +10869,10 @@ module.exports = class PaperLibraryPlugin extends Plugin {
     this.pdfFigureCatalogCache?.clear?.();
     this.pdfFigureAssetCache?.clear?.();
     this.pdfFigureAssetDirectoryCache?.clear?.();
+    this.pdfFigureCatalogLoading?.clear?.();
+    this.pdfFigureProgressListeners?.clear?.();
+    this.relationCache?.clear?.();
+    this.dailyRecommendationCache = null;
     CLAUDIAN_VIEW_TYPES.forEach((type) => this.app.workspace.detachLeavesOfType(type));
     LEGACY_CLAUDIAN_VIEW_TYPES.forEach((type) => this.app.workspace.detachLeavesOfType(type));
     ALL_VIEW_TYPES.forEach((type) => this.app.workspace.detachLeavesOfType(type));
@@ -12464,6 +12566,28 @@ module.exports.paperLibraryTranslationBridge = {
     return state;
   }
 
+  cleanupComposerPdfTab(tab) {
+    const state = tab?.paperLibraryPdfState;
+    if (!state) return;
+    state.disposed = true;
+    for (const attachment of state.attachments || []) attachment.cancelled = true;
+    state.topControlsObserver?.disconnect?.();
+    state.linkedContentObserver?.disconnect?.();
+    state.voiceRecognition?.abort?.();
+    if (state.linkedPdfReconcileTimer) window.clearTimeout(state.linkedPdfReconcileTimer);
+    if (state.topControlsTimer) window.clearTimeout(state.topControlsTimer);
+    this.cleanupComposerTurnNavigator(tab, state);
+    this.cleanupComposerUnifiedModelControl(tab, state);
+    if (state.originalSendMessage && tab.controllers?.inputController) {
+      tab.controllers.inputController.sendMessage = state.originalSendMessage;
+    }
+    state.strip?.remove?.();
+    if (state.contextRowFallback) state.contextRow?.remove?.();
+    state.attachments = [];
+    delete tab.paperLibraryPdfState;
+    this.composerPdfTabs?.delete?.(tab);
+  }
+
   ensureClaudianPdfBridge(tab) {
     const input = tab?.dom?.inputEl;
     const wrapper = input?.closest?.(".paper-composer-input-wrapper");
@@ -12535,10 +12659,12 @@ module.exports.paperLibraryTranslationBridge = {
   }
 
   scheduleComposerLinkedPdfReconcile(tab, state = this.getComposerPdfState(tab)) {
-    if (!state || state.linkedPdfReconcileScheduled) return;
+    if (!state || state.disposed || this.disposed || state.linkedPdfReconcileScheduled) return;
     state.linkedPdfReconcileScheduled = true;
-    window.setTimeout(() => {
+    state.linkedPdfReconcileTimer = window.setTimeout(() => {
+      state.linkedPdfReconcileTimer = null;
       state.linkedPdfReconcileScheduled = false;
+      if (state.disposed || this.disposed) return;
       this.reconcileComposerLinkedPdfState(tab);
     }, 0);
   }
@@ -13191,10 +13317,12 @@ module.exports.paperLibraryTranslationBridge = {
     }
     if (typeof MutationObserver !== "undefined" && state && !state.topControlsObserver) {
       state.topControlsObserver = new MutationObserver(() => {
-        if (state.topControlsScheduled) return;
+        if (state.disposed || this.disposed || state.topControlsScheduled) return;
         state.topControlsScheduled = true;
-        window.setTimeout(() => {
+        state.topControlsTimer = window.setTimeout(() => {
+          state.topControlsTimer = null;
           state.topControlsScheduled = false;
+          if (state.disposed || this.disposed) return;
           if (!container.isConnected || !tab?.dom?.inputEl?.isConnected) {
             state.topControlsObserver?.disconnect?.();
             state.topControlsObserver = null;
@@ -13290,8 +13418,11 @@ module.exports.paperLibraryTranslationBridge = {
       if (menu.contains(event.target) || button.contains(event.target)) return;
       this.closeComposerPdfModeMenus();
     };
-    menu.paperLibraryCleanup = () => document.removeEventListener("pointerdown", dismiss, true);
-    window.setTimeout(() => document.addEventListener("pointerdown", dismiss, true), 0);
+    const listenerTimer = window.setTimeout(() => document.addEventListener("pointerdown", dismiss, true), 0);
+    menu.paperLibraryCleanup = () => {
+      window.clearTimeout(listenerTimer);
+      document.removeEventListener("pointerdown", dismiss, true);
+    };
     this.refreshComposerModeButtons();
   }
 
@@ -13470,12 +13601,8 @@ module.exports.paperLibraryTranslationBridge = {
   refreshComposerPdfTrays() {
     for (const tab of this.composerPdfTabs || []) {
       if (!tab?.dom?.inputEl?.isConnected) {
-        tab?.paperLibraryPdfState?.topControlsObserver?.disconnect?.();
-        tab?.paperLibraryPdfState?.linkedContentObserver?.disconnect?.();
-        tab?.paperLibraryPdfState?.voiceRecognition?.abort?.();
-        this.cleanupComposerTurnNavigator(tab);
-        this.cleanupComposerUnifiedModelControl(tab);
-        this.composerPdfTabs.delete(tab);
+        // The runtime can detach inactive tab DOM while retaining the tab.
+        // Closed tabs are pruned against its tab manager by the mount bridge.
         continue;
       }
       this.renderComposerPdfTray(tab);
@@ -13878,22 +14005,23 @@ module.exports.paperLibraryTranslationBridge = {
 
   installClaudianDropBridge() {
     if (!this.registerDomEvent || typeof document === "undefined") return;
-    let mountScheduled = false;
     const mountComposerInputs = () => {
-      if (mountScheduled) return;
-      mountScheduled = true;
-      window.setTimeout(() => {
-        mountScheduled = false;
+      if (this.disposed || this.composerMountTimer) return;
+      this.composerMountTimer = window.setTimeout(() => {
+        this.composerMountTimer = null;
+        if (this.disposed) return;
         const runtime = this.claudianRuntime;
         const views = typeof runtime?.getAllViews === "function"
           ? runtime.getAllViews()
           : [runtime?.getView?.()].filter(Boolean);
+        const liveTabs = new Set();
         for (const view of views || []) {
           const manager = view?.getTabManager?.();
           const tabs = typeof manager?.getAllTabs === "function"
             ? manager.getAllTabs()
             : [manager?.getActiveTab?.()].filter(Boolean);
           for (const tab of tabs || []) {
+            liveTabs.add(tab);
             if (tab?.dom?.inputEl?.isConnected) {
               this.ensureClaudianPdfBridge(tab);
               this.decorateClaudianSentImageCards(tab);
@@ -13901,12 +14029,15 @@ module.exports.paperLibraryTranslationBridge = {
             }
           }
         }
+        for (const tab of this.composerPdfTabs || []) {
+          if (!liveTabs.has(tab)) this.cleanupComposerPdfTab(tab);
+        }
       }, 0);
     };
     const composerMountSelector = ".paper-composer-input-wrapper, .paper-composer-input-toolbar, textarea.paper-composer-input, .paper-composer-message-images, .paper-composer-message-user";
     this.composerMountObserver?.disconnect?.();
     this.composerMountObserver = new MutationObserver((mutations) => {
-      const hasComposerInput = mutations.some((mutation) => Array.from(mutation.addedNodes || []).some((node) => (
+      const hasComposerInput = mutations.some((mutation) => [...mutation.addedNodes, ...mutation.removedNodes].some((node) => (
         node?.nodeType === 1 && (node.matches?.(composerMountSelector) || node.querySelector?.(composerMountSelector))
       )));
       if (hasComposerInput) mountComposerInputs();
@@ -15127,7 +15258,7 @@ module.exports.paperLibraryTranslationBridge = {
     const pdfjs = await loadPdfJs();
     let document = null;
     try {
-      document = await pdfjs.getDocument({ data: new Uint8Array(buffer.slice(0)) }).promise;
+      document = await this.createPdfDocument(pdfjs, new Uint8Array(buffer.slice(0)));
       const totalPages = Number(document.numPages) || 0;
       const pageCount = Math.min(totalPages, Math.max(1, Number(this.settings.aiLocalPdfMaxPages) || 500));
       await fs.promises.mkdir(inputRoot, { recursive: true });
@@ -17633,10 +17764,12 @@ module.exports.paperLibraryTranslationBridge = {
   }
 
   clearPdfFigureRecognitionState() {
+    this.pdfFigureCacheGeneration = (this.pdfFigureCacheGeneration || 0) + 1;
     (this.pdfFigureCatalogCache || new Map()).forEach((entry) => {
       try { void entry.document?.destroy?.(); } catch (_) {}
     });
     this.pdfFigureCatalogCache?.clear?.();
+    this.pdfFigureCatalogLoading?.clear?.();
     this.pdfFigureProgressListeners?.clear?.();
     this.pdfFigureAssetCache?.clear?.();
     this.pdfFigureAssetDirectoryCache?.clear?.();
@@ -17936,12 +18069,47 @@ module.exports.paperLibraryTranslationBridge = {
     }
   }
 
+  async createPdfDocument(pdfjs, data, onTask = null) {
+    if (this.disposed) throw new Error("插件已关闭");
+    // getDocument's implicit worker uses GlobalWorkerOptions.workerPort. That
+    // port may belong to Obsidian's reader; never destroy or reuse its worker.
+    const worker = typeof pdfjs.PDFWorker === "function" ? new pdfjs.PDFWorker() : null;
+    let loading;
+    try { loading = pdfjs.getDocument({ data, ...(worker ? { worker } : {}) }); }
+    catch (error) { worker?.destroy?.(); throw error; }
+    this.pdfDocumentTasks ||= new Set();
+    let rejectCancelled;
+    const cancelled = new Promise((_, reject) => { rejectCancelled = reject; });
+    let destruction = null;
+    let originalDestroy = null;
+    const task = { destroy: () => {
+      if (destruction) return destruction;
+      rejectCancelled(new Error("PDF 加载已取消"));
+      destruction = Promise.resolve().then(() => loading.destroy ? loading.destroy() : originalDestroy?.()).finally(() => {
+        worker?.destroy?.();
+        this.pdfDocumentTasks.delete(task);
+      });
+      return destruction;
+    } };
+    this.pdfDocumentTasks.add(task);
+    try {
+      onTask?.(task);
+      const document = await Promise.race([loading.promise, cancelled]);
+      originalDestroy = document.destroy?.bind(document);
+      document.destroy = task.destroy;
+      return document;
+    } catch (error) {
+      await task.destroy().catch(() => {});
+      throw error;
+    }
+  }
+
   async loadPdfFigureDocument(pdfPath) {
     const path = normalizePath(pdfPath || "");
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!file) throw new Error("找不到 PDF 文件");
     const [pdfjs, buffer] = await Promise.all([loadPdfJs(), this.app.vault.readBinary(file)]);
-    return pdfjs.getDocument({ data: new Uint8Array(buffer.slice(0)) }).promise;
+    return this.createPdfDocument(pdfjs, new Uint8Array(buffer.slice(0)));
   }
 
   createPdfFigureCatalog(pdfPath, payload, document = null) {
@@ -17994,7 +18162,7 @@ module.exports.paperLibraryTranslationBridge = {
     const current = await inspect(currentDirectory);
     if (current) {
       this.pdfFigureAssetDirectoryCache ||= new Map();
-      this.pdfFigureAssetDirectoryCache.set(resolutionKey, current);
+      if (!this.disposed) setBoundedCacheEntry(this.pdfFigureAssetDirectoryCache, resolutionKey, current, 32);
       return current;
     }
     // Older recognized images may remain valid after a sync or metadata-only
@@ -18012,7 +18180,7 @@ module.exports.paperLibraryTranslationBridge = {
     const resolved = matches[0];
     if (!resolved) throw new Error("这张图片没有可用的识别结果，请重新执行图片识别");
     this.pdfFigureAssetDirectoryCache ||= new Map();
-    this.pdfFigureAssetDirectoryCache.set(resolutionKey, resolved);
+    if (!this.disposed) setBoundedCacheEntry(this.pdfFigureAssetDirectoryCache, resolutionKey, resolved, 32);
     return resolved;
   }
 
@@ -18025,7 +18193,10 @@ module.exports.paperLibraryTranslationBridge = {
     if (!cacheKey) throw new Error("无法定位已识别图片缓存");
     const assetKey = `${cacheKey}:${figureKey}`;
     const cached = this.pdfFigureAssetCache?.get?.(assetKey);
-    if (cached) return await cached;
+    if (cached) {
+      setBoundedCacheEntry(this.pdfFigureAssetCache, assetKey, cached, 32);
+      return await cached;
+    }
     const loading = (async () => {
       const { directory, payload } = await this.resolveRecognizedPdfFigureCache(path, cacheKey, figureKey);
       const figure = (payload.figures || []).find((item) => item.figureKey === figureKey);
@@ -18041,13 +18212,24 @@ module.exports.paperLibraryTranslationBridge = {
       };
     })();
     this.pdfFigureAssetCache ||= new Map();
-    this.pdfFigureAssetCache.set(assetKey, loading);
+    setBoundedCacheEntry(this.pdfFigureAssetCache, assetKey, loading, 32);
     try {
       const asset = await loading;
-      this.pdfFigureAssetCache.set(assetKey, asset);
+      // Late completions cannot repopulate a cleared/evicted cache. Account
+      // for UTF-16 data URL storage, not just the source PNG byte length.
+      if (!this.disposed && this.pdfFigureAssetCache.get(assetKey) === loading) {
+        setBoundedCacheEntry(this.pdfFigureAssetCache, assetKey, asset, 32);
+        let bytes = 0;
+        for (const value of this.pdfFigureAssetCache.values()) bytes += (value.dataUrl?.length || 0) * 2;
+        while (bytes > 24 * 1024 * 1024 && this.pdfFigureAssetCache.size) {
+          const oldest = this.pdfFigureAssetCache.keys().next().value;
+          bytes -= (this.pdfFigureAssetCache.get(oldest)?.dataUrl?.length || 0) * 2;
+          this.pdfFigureAssetCache.delete(oldest);
+        }
+      }
       return asset;
     } catch (error) {
-      this.pdfFigureAssetCache.delete(assetKey);
+      if (this.pdfFigureAssetCache.get(assetKey) === loading) this.pdfFigureAssetCache.delete(assetKey);
       throw error;
     }
   }
@@ -18209,11 +18391,50 @@ module.exports.paperLibraryTranslationBridge = {
   async getPdfFigureCatalog(pdfPath, onProgress) {
     const path = normalizePath(pdfPath || "");
     if (!path) throw new Error("缺少 PDF 路径");
+    if (this.disposed) throw new Error("插件已关闭");
     const cached = this.pdfFigureCatalogCache.get(path);
     if (cached) {
+      setBoundedCacheEntry(this.pdfFigureCatalogCache, path, cached, 16);
       onProgress?.({ stage: "complete", figures: cached.figures.length, cached: true });
       return cached;
     }
+    this.pdfFigureCatalogLoading ||= new Map();
+    this.pdfFigureProgressListeners ||= new Map();
+    if (onProgress) {
+      if (!this.pdfFigureProgressListeners.has(path)) this.pdfFigureProgressListeners.set(path, new Set());
+      this.pdfFigureProgressListeners.get(path).add(onProgress);
+    }
+    let loading = this.pdfFigureCatalogLoading.get(path);
+    if (!loading) {
+      const generation = this.pdfFigureCacheGeneration || 0;
+      loading = this.loadPdfFigureCatalog(path).then((catalog) => {
+        if (this.disposed || generation !== (this.pdfFigureCacheGeneration || 0)) {
+          throw new Error("图片加载已取消");
+        }
+        setBoundedCacheEntry(this.pdfFigureCatalogCache, path, catalog, 16);
+        this.emitPdfFigureProgress(path, { stage: "complete", figures: catalog.figures.length });
+        return catalog;
+      }).catch((error) => {
+        if (this.pdfFigureCatalogLoading.get(path) === loading) {
+          this.emitPdfFigureProgress(path, { stage: "error", message: error.message || String(error) });
+        }
+        throw error;
+      }).finally(() => {
+        if (this.pdfFigureCatalogLoading.get(path) === loading) this.pdfFigureCatalogLoading.delete(path);
+      });
+      this.pdfFigureCatalogLoading.set(path, loading);
+    }
+    try { return await loading; }
+    finally {
+      if (onProgress) {
+        const listeners = this.pdfFigureProgressListeners.get(path);
+        listeners?.delete(onProgress);
+        if (!listeners?.size) this.pdfFigureProgressListeners.delete(path);
+      }
+    }
+  }
+
+  async loadPdfFigureCatalog(path) {
     // Figure coordinates are portable and sufficient for rendering crops from
     // the PDF with PDF.js. Always reuse them before checking the Python/ONNX
     // runtime. This keeps already-recognized figures viewable when a Python
@@ -18224,42 +18445,20 @@ module.exports.paperLibraryTranslationBridge = {
       if (!this.getPortablePdfFigurePayload(path) && this.setPortablePdfFigurePayload(path, payload)) {
         await this.saveSettings();
       }
-      const document = await this.loadPdfFigureDocument(path);
-      const catalog = this.createPdfFigureCatalog(path, payload, document);
-      this.pdfFigureCatalogCache.set(path, catalog);
-      onProgress?.({ stage: "complete", figures: catalog.figures.length, cached: true });
-      return catalog;
+      // Coordinates and captions do not require retaining a PDF.js worker or
+      // the PDF bytes. Acquire the document only while actually painting.
+      return this.createPdfFigureCatalog(path, payload);
     }
     if (this.isMobileApp()) {
       throw new Error("尚未找到桌面端已识别的图片索引，请先在桌面端识别并同步一次");
     }
     if (!this.settings.enableFigureRecognition) throw new Error("图片识别尚未开启");
     if (!this.isDocLayoutRuntimeInstalled()) throw new Error("图片识别运行时尚未安装，请在插件设置中完成下载");
-    if (onProgress) {
-      if (!this.pdfFigureProgressListeners.has(path)) this.pdfFigureProgressListeners.set(path, new Set());
-      this.pdfFigureProgressListeners.get(path).add(onProgress);
-    }
-    const pending = this.pdfFigureCatalogLoading.get(path);
-    if (pending) return pending;
-    const loading = (async () => {
-      this.emitPdfFigureProgress(path, { stage: "model", current: 0, total: 0, figures: 0 });
-      const payload = await this.runDocLayoutFigureExtraction(path, (state) => this.emitPdfFigureProgress(path, state));
-      const catalog = this.createPdfFigureCatalog(path, payload);
-      this.pdfFigureCatalogCache.set(path, catalog);
-      if (this.setPortablePdfFigurePayload(path, payload)) await this.saveSettings();
-      this.emitPdfFigureProgress(path, { stage: "complete", current: payload.totalPages || 0, total: payload.totalPages || 0, figures: catalog.figures.length });
-      return catalog;
-    })();
-    this.pdfFigureCatalogLoading.set(path, loading);
-    try {
-      return await loading;
-    } catch (error) {
-      this.emitPdfFigureProgress(path, { stage: "error", message: error.message || String(error) });
-      throw error;
-    } finally {
-      this.pdfFigureCatalogLoading.delete(path);
-      this.pdfFigureProgressListeners.delete(path);
-    }
+    this.emitPdfFigureProgress(path, { stage: "model", current: 0, total: 0, figures: 0 });
+    const payload = await this.runDocLayoutFigureExtraction(path, (state) => this.emitPdfFigureProgress(path, state));
+    if (this.disposed) throw new Error("插件已关闭");
+    if (this.setPortablePdfFigurePayload(path, payload)) await this.saveSettings();
+    return this.createPdfFigureCatalog(path, payload);
   }
 
   async openPdfFigureAtPoint(pdfPath, paper, pageNumber, xRatio, yRatio) {
@@ -18328,17 +18527,28 @@ module.exports.paperLibraryTranslationBridge = {
     const catalog = await this.getPdfFigureCatalog(pdfPath);
     const thumbnail = Boolean(options.thumbnail);
     if (figure.cropPath && !this.isMobileApp()) return this.paintDocLayoutFigure(canvas, figure.cropPath, thumbnail);
-    if (!catalog.document) catalog.document = await this.loadPdfFigureDocument(pdfPath);
-    const page = await catalog.document.getPage(figure.pageNumber);
-    if (figure.objectId) {
-      try {
-        const image = await this.getPdfImageObject(page, figure.objectId);
-        if (image && (image.bitmap || image.data)) return this.paintPdfImageObject(canvas, image, thumbnail);
-      } catch (error) {
-        console.warn("Paper Library: direct PDF image extraction failed; using page crop", error);
+    catalog.renderUsers = (catalog.renderUsers || 0) + 1;
+    try {
+      catalog.documentLoading ||= this.loadPdfFigureDocument(pdfPath);
+      const pdfDocument = await catalog.documentLoading;
+      const page = await pdfDocument.getPage(figure.pageNumber);
+      if (figure.objectId) {
+        try {
+          const image = await this.getPdfImageObject(page, figure.objectId);
+          if (image && (image.bitmap || image.data)) return await this.paintPdfImageObject(canvas, image, thumbnail);
+        } catch (error) {
+          console.warn("Paper Library: direct PDF image extraction failed; using page crop", error);
+        }
+      }
+      return await this.renderPdfFigureCrop(page, figure, canvas, thumbnail);
+    } finally {
+      catalog.renderUsers -= 1;
+      if (!catalog.renderUsers) {
+        const loading = catalog.documentLoading;
+        catalog.documentLoading = null;
+        try { await (await loading)?.destroy?.(); } catch (_) {}
       }
     }
-    return this.renderPdfFigureCrop(page, figure, canvas, thumbnail);
   }
 
   async exportPdfFigureHighResolution(pdfPath, figure) {
@@ -18346,7 +18556,7 @@ module.exports.paperLibraryTranslationBridge = {
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!file) throw new Error("找不到 PDF 文件");
     const [pdfjs, buffer] = await Promise.all([loadPdfJs(), this.app.vault.readBinary(file)]);
-    const pdfDocument = await pdfjs.getDocument({ data: new Uint8Array(buffer.slice(0)) }).promise;
+    const pdfDocument = await this.createPdfDocument(pdfjs, new Uint8Array(buffer.slice(0)));
     try {
       const page = await pdfDocument.getPage(Math.max(1, Number(figure.pageNumber) || 1));
       const baseViewport = page.getViewport({ scale: 1 });
@@ -18595,9 +18805,11 @@ module.exports.paperLibraryTranslationBridge = {
 
   setupNativePdfToolbar() {
     const mount = () => {
+      if (this.disposed) return;
       if (this.nativePdfMountTimer) window.clearTimeout(this.nativePdfMountTimer);
       this.nativePdfMountTimer = window.setTimeout(() => {
         this.nativePdfMountTimer = null;
+        if (this.disposed) return;
         this.mountNativePdfToolbars();
       }, 60);
     };
@@ -18605,7 +18817,12 @@ module.exports.paperLibraryTranslationBridge = {
       this.registerEvent(this.app.workspace.on("layout-change", mount));
       this.registerEvent(this.app.workspace.on("active-leaf-change", mount));
     }
-    this.nativePdfToolbarObserver = new MutationObserver(mount);
+    this.nativePdfToolbarObserver = new MutationObserver((mutations) => {
+      // Chat streaming and our own toolbar/ink changes do not require scanning PDFs.
+      const selector = ".pdf-toolbar, .page, .textLayer, .workspace-leaf";
+      if (mutations.some((mutation) => [...mutation.addedNodes, ...mutation.removedNodes].some((node) =>
+        node.nodeType === 1 && (node.matches?.(selector) || node.querySelector?.(selector))))) mount();
+    });
     this.nativePdfToolbarObserver.observe(document.body, { childList: true, subtree: true });
     if (this.register) this.register(() => this.nativePdfToolbarObserver?.disconnect());
     mount();
@@ -18613,6 +18830,12 @@ module.exports.paperLibraryTranslationBridge = {
 
   mountNativePdfToolbars() {
     const leaves = this.app.workspace?.getLeavesOfType?.("pdf") || [];
+    const liveContainers = new Set(leaves.map((leaf) => leaf.view?.containerEl).filter(Boolean));
+    this.nativePdfBindingList = (this.nativePdfBindingList || []).filter((binding) => {
+      if (liveContainers.has(binding.container)) return true;
+      this.cleanupNativePdfBinding(binding);
+      return false;
+    });
     leaves.forEach((leaf) => {
       const container = leaf.view?.containerEl;
       const toolbar = container?.querySelector?.(".pdf-toolbar");
@@ -18820,6 +19043,16 @@ module.exports.paperLibraryTranslationBridge = {
         this.nativePdfBindingList.push(binding);
       }
     });
+  }
+
+  cleanupNativePdfBinding(binding) {
+    const { container, pointerDown, pointerUp, contextMenu, dragStart, click } = binding;
+    for (const [event, handler] of [["pointerdown", pointerDown], ["pointerup", pointerUp],
+      ["contextmenu", contextMenu], ["dragstart", dragStart], ["click", click]]) {
+      container.removeEventListener(event, handler, true);
+    }
+    this.nativePdfBindings?.delete?.(container);
+    this.nativePdfStates?.delete?.(container);
   }
 
   handleNativePdfSelectionDrag(event, leaf, container) {
@@ -19463,7 +19696,7 @@ module.exports.paperLibraryTranslationBridge = {
       || String(annotationEl.id || "").replace(/^annotation[_-]?/, "");
     const buffer = await this.app.vault.readBinary(file);
     const pdfjs = await loadPdfJs();
-    const document = await pdfjs.getDocument({ data: new Uint8Array(buffer.slice(0)) }).promise;
+    const document = await this.createPdfDocument(pdfjs, new Uint8Array(buffer.slice(0)));
     try {
       const page = await document.getPage(pageNumber);
       const annotations = await page.getAnnotations({ intent: "display" });
@@ -19564,7 +19797,7 @@ module.exports.paperLibraryTranslationBridge = {
     if (!rects.length) return { pdfRects: [], textItems: [] };
     const buffer = await this.app.vault.readBinary(file);
     const pdfjs = await loadPdfJs();
-    const document = await pdfjs.getDocument({ data: new Uint8Array(buffer.slice(0)) }).promise;
+    const document = await this.createPdfDocument(pdfjs, new Uint8Array(buffer.slice(0)));
     try {
       const page = await document.getPage(pageNumber);
       const textContent = await page.getTextContent();
@@ -20335,8 +20568,7 @@ module.exports.paperLibraryTranslationBridge = {
     let pdfDocument = null;
     try {
       const pdfjs = await loadPdfJs();
-      const loadingTask = pdfjs.getDocument({ data: new Uint8Array(buffer.slice(0)) });
-      pdfDocument = await loadingTask.promise;
+      pdfDocument = await this.createPdfDocument(pdfjs, new Uint8Array(buffer.slice(0)));
       try {
         const metadata = await pdfDocument.getMetadata();
         info = metadata?.info || {};
@@ -22351,6 +22583,8 @@ module.exports.paperLibraryTranslationBridge = {
   }
 
   restorePaperRelationCache() {
+    this.relationCache.clear();
+    this.dailyRecommendationCache = null;
     let migrated = false;
     (this.settings?.papers || []).forEach((paper) => {
       const cached = this.clonePaperRelations(paper.relations);
@@ -22525,6 +22759,27 @@ module.exports.paperLibraryTranslationBridge = {
   }
 
   getPaperRecommendations(limit = 8) {
+    const count = Math.max(1, Number(limit) || 8);
+    const signature = JSON.stringify([
+      new Date().toDateString(), this.uiState?.selectedId,
+      (this.settings.papers || []).map((paper) => {
+        const root = this.relationCache.get(paper.id) || paper.relations;
+        return [paper.id, paper.title, paper.doi, paper.venue, paper.lastOpened,
+          paper.addedAt, paper.flagged, paper.starred, paper.rating, paper.tags, paper.collections,
+          root?.status, root?.provider, root?.updatedAt,
+          root?.citedBy?.provider, root?.citedBy?.items, root?.references?.provider, root?.references?.items];
+      })
+    ]);
+    const cached = this.dailyRecommendationCache;
+    if (cached?.signature === signature && cached.limit >= count) return cached.items.slice(0, count);
+    const cacheLimit = Math.max(20, count);
+    const items = this.computePaperRecommendations(cacheLimit);
+    // A single replaceable result avoids accumulating snapshots of the library.
+    this.dailyRecommendationCache = { signature, limit: cacheLimit, items };
+    return items.slice(0, count);
+  }
+
+  computePaperRecommendations(limit = 8) {
     const library = this.settings.papers || [];
     const candidates = new Map();
     const currentYear = new Date().getFullYear();
@@ -22534,12 +22789,7 @@ module.exports.paperLibraryTranslationBridge = {
       serpapi: "SerpAPI / Google Scholar",
       openalex: "OpenAlex"
     };
-    const isInLibrary = (item) => library.some((paper) => {
-      const leftDoi = normalizeDoiInput(paper.doi || "");
-      const rightDoi = normalizeDoiInput(item.doi || "");
-      if (leftDoi && rightDoi && leftDoi === rightDoi) return true;
-      return titleSimilarity(paper.title || "", item.title || "") >= 0.96;
-    });
+    const isInLibrary = createRecommendationLibraryMatcher(library);
     library.forEach((seed) => {
       const root = this.relationCache.get(seed.id) || this.clonePaperRelations(seed.relations);
       if (!root || root.status !== "ready") return;
@@ -22638,6 +22888,7 @@ module.exports.paperLibraryTranslationBridge = {
   }
 
   async refreshDailyRecommendations(force = false) {
+    if (this.disposed) return false;
     if (this.dailyRecommendationLoading) return this.dailyRecommendationLoading;
     const now = Date.now();
     if (!force && this.dailyRecommendationLastAttemptAt
@@ -22648,6 +22899,7 @@ module.exports.paperLibraryTranslationBridge = {
     const seeds = this.recommendationSeedPapers(sourceLimit);
     this.dailyRecommendationLoading = Promise.resolve().then(async () => {
       for (const paper of seeds) {
+        if (this.disposed) return false;
         const cached = this.relationCache.get(paper.id) || this.clonePaperRelations(paper.relations);
         if (!force && cached && cached.status === "ready" && this.isPaperRelationCacheFresh(cached)) continue;
         try {
@@ -22659,6 +22911,7 @@ module.exports.paperLibraryTranslationBridge = {
           console.warn(`Paper Library: recommendation relation refresh unavailable for ${paper.title}`, error);
         }
       }
+      if (this.disposed) return false;
       const after = this.getPaperRecommendations(20).map((item) => item.key).join("|");
       return before !== after;
     }).finally(() => {
@@ -23396,7 +23649,7 @@ module.exports.paperLibraryTranslationBridge = {
     try {
       const pdfjs = await loadPdfJs();
       const source = buffer instanceof ArrayBuffer ? buffer.slice(0) : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-      document = await pdfjs.getDocument({ data: new Uint8Array(source) }).promise;
+      document = await this.createPdfDocument(pdfjs, new Uint8Array(source));
       return { pageCount: Number(document.numPages) || 0, size: source.byteLength };
     } finally {
       await document?.destroy?.();
@@ -23443,7 +23696,7 @@ module.exports.paperLibraryTranslationBridge = {
       if (!file) return false;
       const buffer = await this.app.vault.readBinary(file);
       const pdfjs = await loadPdfJs();
-      document = await pdfjs.getDocument({ data: new Uint8Array(buffer.slice(0)) }).promise;
+      document = await this.createPdfDocument(pdfjs, new Uint8Array(buffer.slice(0)));
       const page = await document.getPage(1);
       const natural = page.getViewport({ scale: 1 });
       const viewport = page.getViewport({ scale: Math.min(1.4, 120 / natural.width) });
