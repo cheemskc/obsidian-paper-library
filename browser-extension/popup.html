@@ -57,7 +57,19 @@
       <div id="metrics-source" class="metrics-source"></div>
     </section>
 
-    <div id="status" class="status hidden"></div>
+    <section id="collection-panel" class="collection-panel hidden">
+      <label class="field" for="collection-select">
+        <span>保存到 Collection</span>
+        <select id="collection-select" disabled><option value="">未分类</option></select>
+      </label>
+      <div class="collection-feedback">
+        <span id="collection-state" role="status">正在加载 Collection…</span>
+        <button id="collection-retry" class="link hidden">重新加载</button>
+      </div>
+    </section>
+
+    <div id="status" class="status hidden" role="status" aria-live="polite"></div>
+    <button id="open-pdf-btn" class="secondary hidden">打开 PDF 页面</button>
 
     <div id="import-actions" class="actions">
       <button id="import-pdf-btn" class="primary" disabled>

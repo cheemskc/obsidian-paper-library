@@ -1,14 +1,14 @@
 <div align="center">
 
-<img src="docs/assets/paper-library-hero.svg" alt="Paper Library — Library, Research Workspace and Paper Composer" width="100%">
+<img src="docs/assets/paper-library-hero.svg" alt="Paper Library — Library, Native PDF Reader and Paper Composer" width="100%">
 
 # Paper Library
 
 ### 把论文管理、深度阅读与 AI 对话，放进同一个 Obsidian Vault。
 
-从收藏论文到勾画原文，从连接想法到追问整篇文档。一个插件，一条完整的研究工作流。
+从收藏论文到标注原文，从记录想法到追问整篇文档。一个插件，一条完整的研究工作流。
 
-[![Version](https://img.shields.io/badge/version-0.42.3-2563d8?style=flat-square)](https://github.com/Lyle-xub/obsidian-paper-library/releases)
+[![Version](https://img.shields.io/badge/version-0.43.0-2563d8?style=flat-square)](https://github.com/cheemskc/obsidian-paper-library/releases)
 [![Obsidian](https://img.shields.io/badge/Obsidian-1.5%2B-7c3aed?style=flat-square&logo=obsidian&logoColor=white)](https://obsidian.md)
 [![Platforms](https://img.shields.io/badge/platforms-desktop%20%7C%20mobile-24415e?style=flat-square)](#平台支持)
 [![License](https://img.shields.io/badge/license-MIT-2f7a61?style=flat-square)](LICENSE)
@@ -21,7 +21,7 @@
 
 ## 研究不该散落在五个应用里
 
-Paper Library 将资料库、阅读器、可视化研究空间和智能对话整合为 Obsidian 原生工作区。论文、笔记、标注与关系数据保留在你的 Vault 中；阅读时产生的上下文，可以直接进入 Paper Composer，而不必反复复制、解释文件来源或重新上传。
+Paper Library 将资料库、Obsidian 原生 PDF 阅读器、标注管理和智能对话整合为 Obsidian 原生工作区。论文、笔记、标注与关系数据保留在你的 Vault 中；阅读时产生的上下文，可以直接进入 Paper Composer，而不必反复复制、解释文件来源或重新上传。
 
 <table>
   <tr>
@@ -33,12 +33,12 @@ Paper Library 将资料库、阅读器、可视化研究空间和智能对话整
     <td width="33%" valign="top">
       <h3>02 · Read</h3>
       <p><strong>让阅读痕迹成为知识结构</strong></p>
-      <p>勾画、画线、摘录、卡片与连线在原生阅读器和研究空间之间保持同步。</p>
+      <p>在原生 PDF 阅读器中标注、添加备注，并在右栏集中查看和管理。</p>
     </td>
     <td width="33%" valign="top">
       <h3>03 · Compose</h3>
       <p><strong>带着整篇论文追问 AI</strong></p>
-      <p>文字、图片、页面区域和研究节点均可成为 linked content，并与全文语境联动。</p>
+      <p>文字、图片和页面区域均可成为 linked content，并与全文语境联动。</p>
     </td>
   </tr>
 </table>
@@ -53,21 +53,23 @@ Paper Library 将资料库、阅读器、可视化研究空间和智能对话整
 - 自动识别期刊与会议信息，支持 CCF、JCR、影响因子和会议录用率。
 - 管理论文主文件、补充材料、Markdown 阅读笔记及引用关系。
 - APA、IEEE、Chicago、MLA、Harvard、Vancouver 等引用预览与导出。
-- 标准、画廊、纸境、蓝图和自定义外观，桌面端与移动端可分别选择。
+- 统一采用标准视图，桌面端与移动端可分别设置强调色。
 
-### Research Workspace · 把阅读变成可连接的思考
+### PDF 阅读与标注 · 在原生阅读器里完成
 
-- 双击论文进入单一可视化研究空间，连续加载文档页面。
-- 将原文选区拖成摘录卡，也可创建想法卡和主题卡。
-- 卡片四边均可建立连接，支持移动、缩放、搜索和自动整理。
-- 荧光笔与自由画笔实时显示；研究空间与 Obsidian 原生阅读器共用同一份标注数据。
-- 标注、笔迹、卡片和来源链接会随论文重命名或目录调整自动迁移。
+- 双击论文使用 Obsidian 原生 PDF 阅读器；旧研究画布设置自动迁移。
+- 选中文字后自动弹出标注窗口，选择颜色、样式并添加备注；点击保存才写入。
+- 支持高亮、下划线、波浪线、删除线和文字注释，并保留自由画笔。
+- 设置中可定义每种标注样式的含义，选文窗口和管理列表同步展示。
+- 右栏「标注管理」查看当前文献或全部文献的 Paper Library 标注。
+- 按样式、颜色、正文、备注、样式含义或文献标题筛选，回跳原文或删除。
+- 文字标注与备注写入本地 PDF 和论文笔记，删除同步到两处；自由画笔保存在插件数据中。
+- 原有标注、笔迹、摘录和想法数据保留；标注会随论文重命名或目录调整自动迁移。
 - 识别论文中的图片并提供目录、轮播、缩放、全屏、图注与 PNG 下载。
-- 研究结果同步写入论文 Markdown 笔记，便于搜索、引用和长期保存。
 
 ### Ask AI · 选中什么，就从什么开始问
 
-- 拖入论文、Markdown、文字选区、图片或研究节点。
+- 拖入论文、Markdown、文字选区、图片或标注内容。
 - 圈选页面区域后，以图片形式加入当前对话。
 - 右键文字、图片、论文卡片或中间栏论文即可添加到 Paper Composer。
 - 所有上下文以清晰的小卡片展示，不向消息正文暴露内部标签或元数据。
@@ -138,14 +140,14 @@ MinerU 结果保存在 `<Vault>/.obsidian/plugins/paper-library/mineru-cache/v1/
 ## 一条自然的工作流
 
 ```text
-收集论文 → 整理元数据与分类 → 阅读并勾画
-        → 拖出摘录 / 图片 / 区域 → 连接研究卡片
+收集论文 → 整理元数据与分类 → 原生 PDF 阅读
+        → 选文标注与备注 → 右栏管理与回跳
         → 绑定为 linked content → 结合全文继续追问
 ```
 
 1. 把本地文件拖入中央论文库，确认自动识别的元数据。
-2. 双击论文进入研究空间，或直接使用 Obsidian 原生阅读器。
-3. 勾画文字、用自由画笔标记，或者把选区拖成研究卡片。
+2. 双击论文使用 Obsidian 原生 PDF 阅读器。
+3. 选中文字，在弹出窗口中设置样式、颜色和备注；在右栏管理标注。
 4. 右键或拖动内容到 Paper Composer；论文自动成为 linked content。
 5. 继续提问。当前会话会保留文档关系，而不会每轮重新附带完整正文。
 
@@ -153,7 +155,7 @@ MinerU 结果保存在 `<Vault>/.obsidian/plugins/paper-library/mineru-cache/v1/
 
 ### 手动安装
 
-1. 从 [GitHub Releases](https://github.com/Lyle-xub/obsidian-paper-library/releases/latest) 下载 `paper-library-版本号.zip`。
+1. 从 [GitHub Releases](https://github.com/cheemskc/obsidian-paper-library/releases/latest) 下载 `paper-library-版本号.zip`。
 2. 解压后，把完整的 `paper-library` 文件夹放到 `<你的 Vault>/.obsidian/plugins`下；
 3. 重载 Obsidian，然后在「设置 → 第三方插件」中启用 **Paper Library**。
 4. 点击左侧 ribbon 的 Library 图标，或运行命令 `Open paper library`。
@@ -177,11 +179,11 @@ MinerU 结果保存在 `<Vault>/.obsidian/plugins/paper-library/mineru-cache/v1/
 |---|:---:|:---:|
 | 论文库、详情、分类与标签 | ✓ | ✓ |
 | 原生阅读标注与 Markdown 同步 | ✓ | ✓ |
-| 可视化研究空间 | ✓ | ✓ |
+| 原生 PDF 标注窗口与标注管理 | ✓ | 待真机验证 |
 | Paper Composer 完整 Agent 能力 | ✓ | — |
 | 本地版面与图片识别 | ✓ | — |
 
-移动端采用更低的页面渲染倍率和紧凑工具栏，以降低 WebView 内存压力。桌面与移动端外观设置互不覆盖。
+移动端采用更低的页面渲染倍率和紧凑工具栏，以降低 WebView 内存压力。桌面与移动端强调色设置互不覆盖。
 
 ## 开发
 
@@ -190,7 +192,7 @@ npm run check
 npm test
 ```
 
-- [外观协议与自定义主题](APPEARANCE_API.md)
+- [标准视图与强调色](APPEARANCE_API.md)
 - [浏览器扩展开发说明](browser-extension/README.md)
 - `demo.html` 是独立 UI 预览，不读写 Vault 数据。
 
@@ -205,3 +207,11 @@ npm test
 <sub>Built for long papers, messy questions, and the moment one note finally connects to another.</sub>
 
 </div>
+# 原生 PDF 即时标注
+
+新增标注借鉴并适配 [Elton Reader](https://github.com/swayinfo/elton-reader)
+的即时绘制、独立持久化方式，仍使用 Obsidian 原生 PDF 阅读器。
+标注记录保存在插件 `data.json` 的对应文献中，同时同步到文献笔记；
+新增、删除及修改这些独立标注不会改写或重载整份 PDF。
+在标注管理中点击「写入 PDF」可批量嵌入，嵌入后由原生阅读器显示。
+原来已嵌入 PDF 的标注不迁移、不删除。来源与许可见 [ELTON_NOTICE.md](ELTON_NOTICE.md)。

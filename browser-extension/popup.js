@@ -33,10 +33,18 @@ const ui = {
   test: document.getElementById("test-btn"),
   connection: document.getElementById("conn-state")
 };
+ui.collectionPanel = document.getElementById("collection-panel");
+ui.collection = document.getElementById("collection-select");
+ui.collectionState = document.getElementById("collection-state");
+ui.collectionRetry = document.getElementById("collection-retry");
+ui.openPdf = document.getElementById("open-pdf-btn");
 
 let currentPaper = null;
 let currentTabId = null;
 let currentLibraryPaper = null;
+let collectionsReady = false;
+let importing = false;
+let retryPdfUrl = "";
 
 function pdfLike(value) {
   const url = String(value || "");
@@ -65,6 +73,7 @@ function fallbackFromTab(tab) {
   let site = "";
   try { site = new URL(url).hostname; } catch (_) { /* non-web tab */ }
   return {
+    isPaper: Boolean(isPdfPage || arxiv),
     url,
     title: cleanViewerTitle(tab?.title),
     authors: [], year: 0, venue: "", abstract: "", doi: "", arxiv,
@@ -93,7 +102,7 @@ async function detect(tab) {
 }
 
 function recognized(paper) {
-  return Boolean(paper && (paper.title || paper.doi || paper.arxiv || paper.pdfUrl || paper.isPdfPage));
+  return Boolean(paper && paper.isPaper !== false && (paper.title || paper.doi || paper.arxiv || paper.pdfUrl || paper.isPdfPage));
 }
 
 function addChip(text) {
@@ -107,8 +116,9 @@ function render(paper) {
   const available = recognized(paper);
   ui.paperCard.classList.toggle("hidden", !available);
   ui.emptyCard.classList.toggle("hidden", available);
-  ui.importPdf.disabled = !available;
-  ui.metadata.disabled = !available || (!paper?.title && !paper?.doi && !paper?.arxiv);
+  ui.importPdf.disabled = !available || !collectionsReady;
+  ui.metadata.disabled = !available || !collectionsReady || (!paper?.title && !paper?.doi && !paper?.arxiv);
+  ui.collectionPanel.classList.toggle("hidden", !available);
   if (!available) return;
 
   ui.title.textContent = paper.title || (paper.isPdfPage ? "当前 PDF" : "未识别标题");
@@ -156,7 +166,15 @@ function renderLibraryPaper(paper) {
   const found = Boolean(paper);
   ui.libraryBadge.classList.toggle("hidden", !found);
   ui.libraryCard.classList.toggle("hidden", !found);
-  ui.importActions.classList.toggle("hidden", found);
+  ui.importActions.classList.remove("hidden");
+  ui.importPdf.classList.toggle("hidden", found && paper.hasPdf);
+  ui.importActions.classList.toggle("single-action", found && paper.hasPdf);
+  ui.importPdf.textContent = found ? "下载并补充 PDF" : "下载 PDF 并导入";
+  ui.metadata.textContent = found ? "添加到 Collection" : "仅导入文献信息";
+  if (found && paper.collections?.length && !ui.collection.value && collectionsReady) {
+    ui.collection.value = paper.collections[0];
+  }
+  setBusy(importing);
   if (!found) return;
 
   ui.localVenue.textContent = paper.venue || "未记录期刊或会议";
@@ -194,7 +212,36 @@ function renderLibraryPaper(paper) {
   const updated = formatDate(paper.metricsUpdatedAt);
   ui.metricsSource.textContent = `${paper.hasPdf ? "PDF 已保存" : "仅文献信息"} · ${paper.metricsSource || "本地论文库"}${updated ? ` · ${updated} 更新` : ""}`;
   ui.access.className = "access-state ready in-library";
-  ui.access.textContent = "已存在于 Paper Library，不会重复导入";
+  ui.access.textContent = paper.hasPdf ? "已存在于 Paper Library，PDF 已保存" : "已保存文献信息，可以继续补充 PDF";
+}
+
+async function refreshCollections() {
+  const selected = ui.collection.value;
+  collectionsReady = false;
+  ui.collection.disabled = true;
+  ui.collectionState.textContent = "正在加载 Collection…";
+  ui.collectionRetry.classList.add("hidden");
+  try {
+    const reply = await chrome.runtime.sendMessage({ type: "paperlib:collections" });
+    if (!reply) throw new Error("扩展后台尚未更新，请在扩展管理页重新加载 Paper Library Web Importer，再刷新论文网页");
+    if (!reply?.ok || !Array.isArray(reply.collections)) throw new Error(reply?.error || "Collection 加载失败");
+    ui.collection.replaceChildren();
+    for (const value of ["", ...reply.collections]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value || "未分类";
+      ui.collection.appendChild(option);
+    }
+    if (reply.collections.includes(selected)) ui.collection.value = selected;
+    else if (currentLibraryPaper?.collections?.length) ui.collection.value = currentLibraryPaper.collections[0];
+    collectionsReady = true;
+    ui.collection.disabled = importing;
+    ui.collectionState.textContent = reply.collections.length ? "" : "暂无 Collection，可先在 Obsidian 中创建";
+  } catch (error) {
+    ui.collectionState.textContent = String(error?.message || error);
+    ui.collectionRetry.classList.remove("hidden");
+  }
+  setBusy(importing);
 }
 
 async function refreshLibraryStatus() {
@@ -230,8 +277,13 @@ function clearStatus() {
 }
 
 function setBusy(busy) {
-  ui.importPdf.disabled = busy || !recognized(currentPaper);
-  ui.metadata.disabled = busy || !recognized(currentPaper);
+  importing = busy;
+  ui.importPdf.disabled = busy || !recognized(currentPaper) || !collectionsReady;
+  ui.metadata.disabled = busy || !recognized(currentPaper) || !collectionsReady || (currentLibraryPaper
+    ? !collectionsReady || !ui.collection.value
+    : !currentPaper?.title && !currentPaper?.doi && !currentPaper?.arxiv);
+  ui.collection.disabled = busy || !collectionsReady;
+  ui.collectionRetry.disabled = busy;
 }
 
 async function refreshConnection() {
@@ -253,21 +305,28 @@ async function refreshConnection() {
 }
 
 async function importPaper(includePdf) {
-  if (!currentPaper) return;
+  if (!currentPaper || importing) return;
+  if (!collectionsReady) {
+    status("error", "请先重新加载 Collection；若扩展后台尚未更新，请在扩展管理页重新加载扩展");
+    return;
+  }
+  const collection = collectionsReady ? ui.collection.value : "";
   setBusy(true);
-  status("working", includePdf ? "正在获取 PDF，并交给 Obsidian 导入…" : "正在导入文献信息…");
+  ui.openPdf.classList.add("hidden");
+  status("working", includePdf ? "正在获取 PDF，并交给 Obsidian 导入…" : currentLibraryPaper ? "正在保存 Collection…" : "正在导入文献信息…");
   try {
     const reply = await chrome.runtime.sendMessage({
       type: "paperlib:import",
       info: currentPaper,
       includePdf,
-      tabId: currentTabId
+      tabId: currentTabId,
+      collection
     });
     if (reply?.ok) {
       status(reply.duplicate && !reply.attachedPdf ? "working" : "success", reply.attachedPdf
         ? `已为现有条目补充 PDF：${reply.title || currentPaper.title}`
         : reply.duplicate
-          ? `库中已有：${reply.title || currentPaper.title}`
+          ? collection ? `已保存到 Collection：${collection}` : `库中已有：${reply.title || currentPaper.title}`
         : reply.metadataOnly
           ? `文献信息已导入：${reply.title || currentPaper.title}`
           : `PDF 已导入：${reply.title || currentPaper.title || "当前论文"}`);
@@ -275,7 +334,11 @@ async function importPaper(includePdf) {
       await refreshLibraryStatus();
       return;
     }
-    status(reply?.code === "needs-login" ? "login" : "error", reply?.error || "导入失败");
+    status(["needs-login", "needs-verification"].includes(reply?.code) ? "login" : "error", reply?.error || "导入失败");
+    if (["needs-login", "needs-verification"].includes(reply?.code)) {
+      retryPdfUrl = reply.pdfUrl || currentPaper.pdfUrl || "";
+      ui.openPdf.classList.toggle("hidden", !/^https?:\/\//i.test(retryPdfUrl));
+    }
     if (reply?.code === "needs-login" || reply?.code === "no-pdf") ui.metadata.classList.add("emphasize");
   } catch (error) {
     status("error", String(error?.message || error || "导入失败"));
@@ -300,8 +363,15 @@ async function initialize() {
     });
     status("success", "连接设置已保存");
     await refreshConnection();
+    await refreshCollections();
+    await refreshLibraryStatus();
   });
-  ui.test.addEventListener("click", refreshConnection);
+  ui.test.addEventListener("click", async () => { await refreshConnection(); await refreshCollections(); await refreshLibraryStatus(); });
+  ui.collectionRetry.addEventListener("click", refreshCollections);
+  ui.collection.addEventListener("change", () => setBusy(importing));
+  ui.openPdf.addEventListener("click", () => {
+    if (/^https?:\/\//i.test(retryPdfUrl)) void chrome.tabs.create({ url: retryPdfUrl });
+  });
   ui.importPdf.addEventListener("click", () => { clearStatus(); void importPaper(true); });
   ui.metadata.addEventListener("click", () => { clearStatus(); void importPaper(false); });
 
@@ -310,6 +380,7 @@ async function initialize() {
   currentPaper = await detect(tab);
   render(currentPaper);
   await refreshConnection();
+  await refreshCollections();
   await refreshLibraryStatus();
 }
 

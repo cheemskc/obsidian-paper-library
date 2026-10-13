@@ -67,5 +67,29 @@ assert.equal(plugin.getPaperItemType({ publicationType: "dissertation" }).id, "t
 assert.equal(plugin.getPaperItemType({ publicationType: "proceedings-article" }).id, "conference");
 assert.equal(plugin.getPaperItemType({ arxiv: "2605.19260", venue: "arXiv" }).id, "preprint");
 assert.equal(plugin.getPaperItemType({ title: "ISO 31000 Risk management", venue: "ISO" }).id, "standard");
+for (const itemType of ["document", "journal", "conference", "patent", "thesis", "preprint", "standard", "report"]) {
+  assert.equal(plugin.getPaperItemType({ itemType, publicationType: "patent", venue: "arXiv", arxiv: "2605.19260" }).id, itemType,
+    "the editor selection must override conflicting imported types and inferred identifiers");
+}
+assert.equal(plugin.getPaperItemType({ itemType: "", publicationType: "dissertation" }).id, "thesis", "automatic mode keeps inference");
+assert.equal(plugin.getPaperItemType({ itemType: "unknown", publicationType: "patent" }).id, "patent", "legacy types retain fallback inference");
+
+for (const [oldAppearance, customId, expected] of [
+  ["gallery", "", "standard"], ["paperglass", "", "standard"],
+  ["custom", "my-layout", "standard"], ["custom", "blueprint", "standard"],
+  ["custom:blueprint", "", "standard"], ["blueprint", "", "standard"]
+]) {
+  const migrated = plugin.normalizeReloadedSettings({
+    libraryAppearance: oldAppearance, libraryAppearanceMobile: oldAppearance,
+    activeCustomAppearanceId: customId, customAppearanceCss: ".test {}", customAppearances: [],
+    libraryViewStyle: "severance", papers: [{ id: "preserved", title: "Keep this paper", itemType: "journal", tags: ["keep"], collections: ["Work"] }]
+  });
+  assert.equal(migrated.libraryAppearance, expected);
+  assert.equal(migrated.libraryAppearanceMobile, expected);
+  assert.equal(migrated.papers[0].itemType, "journal");
+  assert.deepEqual(migrated.papers[0].tags, ["keep"]);
+  assert.deepEqual(migrated.papers[0].collections, ["Work"]);
+  for (const key of ["customAppearances", "customAppearanceCss", "activeCustomAppearanceId", "libraryViewStyle"]) assert.equal(key in migrated, false);
+}
 
 console.log("Local PDF metadata tests passed.");

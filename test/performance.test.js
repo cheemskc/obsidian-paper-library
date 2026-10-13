@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const viewScopeSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "../main.js"), "utf8");
+assert.ok(!/\b(?:get|set) scope\(/.test(viewScopeSource), "Library filter state must not shadow Obsidian View.scope keyboard routing");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const Module = require("node:module");
@@ -182,8 +184,9 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
   const container = { removeEventListener: () => removed++ };
   lifecycle.nativePdfBindings = new WeakMap([[container, {}]]);
   lifecycle.nativePdfStates = new WeakMap([[container, {}]]);
-  lifecycle.cleanupNativePdfBinding({ container });
-  assert.equal(removed, 5);
+  const handler = () => {};
+  lifecycle.cleanupNativePdfBinding({ container, pointerDown: handler, pointerUp: handler, keyUp: handler, contextMenu: handler, dragStart: handler, click: handler });
+  assert.equal(removed, 6, "all native PDF listeners, including keyboard selection, are removed");
   assert.ok(!lifecycle.nativePdfBindings.has(container) && !lifecycle.nativePdfStates.has(container));
   console.log("Performance and resource lifecycle tests passed.");
 })().catch(error => { console.error(error); process.exitCode = 1; });
