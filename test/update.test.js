@@ -6,7 +6,12 @@ const obsidianMock = {
   Plugin: class {}, PluginSettingTab: class {}, Setting: class {}, Platform: {},
   addIcon: () => {}, requireApiVersion: () => true,
   loadPdfJs: async () => null, normalizePath: (value) => value,
-  requestUrl: async () => ({ json: {} }), setIcon: () => {}
+  requestUrl: async ({ url }) => {
+    assert.equal(url, "https://api.github.com/repos/cheemskc/obsidian-paper-library/releases/latest", "本分支应从实际发布仓库检查更新");
+    return { status: 200, json: { tag_name: "0.43.0", assets: [
+      { name: "paper-library-0.43.0.zip", browser_download_url: "https://github.com/cheemskc/obsidian-paper-library/releases/download/0.43.0/paper-library-0.43.0.zip" }
+    ] } };
+  }, setIcon: () => {}
 };
 const originalLoad = Module._load;
 Module._load = function load(request, parent, isMain) {
@@ -39,4 +44,13 @@ assert.equal(isPaperLibraryReleaseFile("pipeline/worker.cjs"), true);
 assert.equal(isPaperLibraryReleaseFile("data.json"), false);
 assert.equal(isPaperLibraryReleaseFile("models/model.onnx"), false);
 
-console.log("Self-update tests passed.");
+(async () => {
+  const plugin = new PaperLibraryPlugin();
+  plugin.manifest = { version: "0.42.6" };
+  plugin.isMobileApp = () => false;
+  const update = await plugin.checkForPaperLibraryUpdate();
+  assert.equal(update.available, true);
+  assert.equal(update.version, "0.43.0");
+  assert.match(update.assetUrl, /cheemskc\/obsidian-paper-library/);
+  console.log("Self-update tests passed.");
+})().catch((error) => { console.error(error); process.exitCode = 1; });

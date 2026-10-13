@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Paper Library Web Importer",
-  "version": "2.1.0",
+  "version": "2.2.1",
   "description": "从论文网页或浏览器 PDF 阅读器一键下载全文并导入 Obsidian Paper Library。",
-  "permissions": ["storage", "tabs", "activeTab", "scripting", "downloads"],
+  "permissions": ["storage", "tabs", "activeTab", "scripting"],
   "host_permissions": [
     "<all_urls>",
     "http://127.0.0.1/*",

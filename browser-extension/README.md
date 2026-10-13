@@ -1,4 +1,4 @@
-# Paper Library Web Importer 2.1.0
+# Paper Library Web Importer 2.2.1
 
 从论文详情页、出版社全文页或浏览器内置 PDF 阅读器，一键将论文 PDF 导入 Obsidian Paper Library。
 
@@ -8,13 +8,17 @@
 - 自动定位 arXiv、ACM、IEEE、Springer、Nature、ScienceDirect、Wiley、Taylor & Francis、Optica 等页面公开的 PDF 链接；
 - 页面没有 PDF 链接时，使用 DOI、arXiv ID 或标题查询 Semantic Scholar 的 Open Access PDF；
 - 订阅网站使用当前浏览器的 Cookie 和登录会话下载，不读取或上传账号密码；
-- 出版商拒绝 `fetch` 时，自动回退到浏览器原生下载通道；
-- IEEE Xplore 会将 `stamp.jsp` 查看器自动转换为 `stampPDF/getPDF.jsp` 二进制端点；遇到 AWS WAF 时先执行一次隐藏的正常浏览器导航，再重试下载；
+- 所有自动获取都在内存中校验 PDF 文件头，验证通过才导入；获取失败仅提示，不自动下载 HTML、不生成浏览器下载文件；
+- IEEE Xplore 会将 `stamp.jsp` 查看器自动转换为 `stampPDF/getPDF.jsp` 二进制端点；网站阻止获取时，可手动打开全文页后重试；
 - Semantic Scholar 没有返回公开 PDF 或遇到限流时，会以严格题名匹配查询 arXiv 官方接口；
-- 当前论文已经导入时，弹窗会隐藏导入按钮并直接展示本地分区、影响因子、引用、参考文献和分类数据；
+- 当前论文已经导入时，弹窗展示本地分区、影响因子、引用、参考文献和分类；缺少 PDF 时仍可补充全文；
 - 直接打开在线 PDF 时，无需返回详情页即可导入；
 - PDF 使用二进制流传给本机 Obsidian，不使用 Base64 JSON；
 - 支持仅导入文献信息，后续可在 Paper Library 中补充全文。
+- 识别论文后可手动选择 Obsidian 中已有的 Collection（包括子分类）；PDF 和纯文献信息均保存到所选分类，已有论文可追加分类。
+- 已保存文献信息但缺少 PDF 时，保留“下载并补充 PDF”入口。
+- 区分出版商网站的人机验证与订阅登录；遇到验证时可打开 PDF 页面，手动完成验证后重试。
+- PDF 和分类保存完成后立即报告成功，元数据补全在 Obsidian 后台继续。
 
 ## 安装扩展
 
@@ -37,7 +41,9 @@
 
 ### Open Access 论文
 
-打开论文页面并点击扩展图标，再选择「下载 PDF 并导入」。扩展会优先使用页面给出的 PDF，必要时自动查找 Open Access 全文。
+打开论文页面并点击扩展图标，选择「保存到 Collection」（也可保持「未分类」），再点击「下载 PDF 并导入」。扩展会优先使用页面给出的 PDF，必要时自动查找 Open Access 全文。
+
+更新后需重新加载浏览器扩展并刷新论文网页。Collection 列表从本地论文库读取，不存在的分类会提示重新选择；扩展后台未更新时显示明确的重载提示并阻止旧后台继续导入。
 
 ### 订阅论文
 
@@ -58,7 +64,7 @@
 - PDF 和论文信息只发送到 `127.0.0.1` 上的 Obsidian 插件服务；
 - 本地接口使用随机 Bearer Token 鉴权；
 - 扩展不收集账号、密码和浏览历史；
-- `downloads` 权限仅用于少数拒绝脚本下载的出版社，成功导入后临时下载文件会被清理；
+- 不申请 `downloads` 权限，不执行自动落盘下载；只把已确认的 PDF 字节传给本机 Obsidian；
 - `<all_urls>` 权限用于识别当前论文页面和下载不同出版社域名上的 PDF。
 
 ## 文件结构

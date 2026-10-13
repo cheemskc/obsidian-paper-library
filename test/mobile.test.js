@@ -254,8 +254,8 @@ async function run() {
   assert.match(stylesSource, /\(any-pointer: coarse\)/);
   assert.match(mainSource, /addRibbonIcon\("library", "Open Paper Library"/);
   assert.doesNotMatch(mainSource, /addRibbonIcon\("library-big"/);
-  assert.match(mainSource, /iconButton\(tabs, "edit-3", "编辑论文信息"/);
-  assert.match(mainSource, /iconButton\(tabs, "bar-chart-2", "论文数据"/);
+  assert.match(mainSource, /id: "edit", icon: "edit-3", label: "编辑论文信息"/);
+  assert.match(mainSource, /id: "data", icon: "bar-chart-2", label: "论文数据"/);
   assert.match(mainSource, /paperlib-icon-fallback/);
   assert.match(mainSource, /const PAPERLIB_ICON_ALIASES =/);
   assert.match(mainSource, /"panel-left-open": \["panel-left", "sidebar", "menu"\]/);
@@ -295,7 +295,7 @@ async function run() {
   const fakeDocument = { getPage: async () => ({}) };
   plugin.loadPdfFigureDocument = async () => fakeDocument;
   const mobileCatalog = await plugin.getPdfFigureCatalog(pdfFile.path);
-  assert.equal(mobileCatalog.document, fakeDocument);
+  assert.equal(mobileCatalog.document, null, "figure coordinates must not retain a PDF document before painting");
   assert.equal(mobileCatalog.figures[0].caption, "Portable figure");
   assert.deepEqual(mobileCatalog.pageSizes.get(2), { width: 1224, height: 1584 });
   plugin.manifest = { dir: "/private/vault/.obsidian/plugins/obsidian-paper-library" };

@@ -39,6 +39,17 @@ async function postJson(settings, path, payload) {
   return { status: response.status, data: await responseJson(response) };
 }
 
+async function listCollections() {
+  const bridge = await requireBridge();
+  if (bridge.error) return bridge.error;
+  const response = await fetch(endpoint(bridge.settings, "/api/collections"), {
+    headers: { Authorization: `Bearer ${bridge.settings.token}` }
+  });
+  const data = await responseJson(response);
+  if (response.status === 404) return { ok: false, error: "请重新加载 Obsidian 插件以选择 Collection" };
+  return data.ok ? data : { ok: false, error: data.error || "Collection 加载失败，请检查连接后重试" };
+}
+
 async function postPdf(settings, metadata, fileName, pdfBuffer) {
   const json = new TextEncoder().encode(JSON.stringify({ metadata, fileName }));
   const header = new Uint8Array(4);
@@ -101,49 +112,6 @@ function normalizePublisherPdfUrl(value, info = {}) {
   return original;
 }
 
-function isIeeePdfUrl(value) {
-  try {
-    const url = new URL(String(value || ""));
-    return url.hostname === "ieeexplore.ieee.org"
-      && /\/stampPDF\/getPDF\.jsp/i.test(url.pathname);
-  } catch (_) { return false; }
-}
-
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-async function warmPdfNavigation(url) {
-  // IEEE's AWS WAF allows the same URL as a top-level navigation after the
-  // institution session is established, but can reject extension fetch/XHR.
-  // Load it once in an inactive tab so its challenge and redirect execute in
-  // the real browser context, then retry the binary download.
-  let tab = null;
-  try {
-    tab = await chrome.tabs.create({ url, active: false });
-    await new Promise((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        chrome.tabs.onUpdated.removeListener(onUpdated);
-        resolve();
-      };
-      const onUpdated = (tabId, changeInfo) => {
-        if (tabId === tab.id && changeInfo.status === "complete") finish();
-      };
-      chrome.tabs.onUpdated.addListener(onUpdated);
-      setTimeout(finish, 12000);
-    });
-    await delay(900);
-    return true;
-  } catch (_) {
-    return false;
-  } finally {
-    if (tab?.id) chrome.tabs.remove(tab.id).catch(() => undefined);
-  }
-}
-
 function isPdf(buffer) {
   if (!buffer || buffer.byteLength < 5) return false;
   return String.fromCharCode(...new Uint8Array(buffer.slice(0, 5))) === "%PDF-";
@@ -160,8 +128,14 @@ async function fetchPdfFromPage(tabId, url) {
   if (!tabId) return null;
   try {
     const reply = await chrome.tabs.sendMessage(tabId, { type: "paperlib:fetch-pdf", url });
-    if (reply?.ok && reply.base64) return { kind: "pdf", buffer: fromBase64(reply.base64) };
+    if (reply?.ok && reply.base64) {
+      const buffer = fromBase64(reply.base64);
+      // Recheck bytes even if the page's content script is from an older load.
+      if (isPdf(buffer)) return { kind: "pdf", buffer };
+      return { kind: "unavailable", error: "页面返回的内容不是 PDF" };
+    }
     if (reply?.reason === "needs-login") return { kind: "needs-login", status: reply.status };
+    if (reply?.reason === "needs-verification") return { kind: "needs-verification", status: reply.status };
     return { kind: "unavailable", status: reply?.status, error: reply?.error };
   } catch (_) {
     return null;
@@ -170,72 +144,21 @@ async function fetchPdfFromPage(tabId, url) {
 
 async function fetchPdfFromWorker(url) {
   try {
-    const response = await fetch(url, { credentials: "include", redirect: "follow" });
+    const response = await fetch(url, { credentials: "include", redirect: "follow", signal: AbortSignal.timeout(25000) });
+    const buffer = await response.arrayBuffer();
+    if (!isPdf(buffer) && /captcha|are you a robot|verify you are human|checking your browser|challenge-platform|crasolve/i.test(
+      new TextDecoder().decode(buffer.slice(0, 256 * 1024)))) {
+      return { kind: "needs-verification", status: response.status };
+    }
     if (response.status === 401 || response.status === 403) {
       return { kind: "needs-login", status: response.status };
     }
     if (!response.ok) return { kind: "unavailable", status: response.status };
-    const buffer = await response.arrayBuffer();
     if (isPdf(buffer)) return { kind: "pdf", buffer };
     const contentType = String(response.headers.get("content-type") || "");
     return /html/i.test(contentType)
       ? { kind: "needs-login", contentType }
       : { kind: "unavailable", contentType };
-  } catch (error) {
-    return { kind: "unavailable", error: String(error?.message || error) };
-  }
-}
-
-function startBrowserDownload(url) {
-  return new Promise((resolve) => {
-    let id = null;
-    let settled = false;
-    const timeout = setTimeout(() => finish({ kind: "unavailable", error: "下载超时" }), 120000);
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      chrome.downloads.onChanged.removeListener(onChanged);
-      resolve(result);
-    };
-    const onChanged = (delta) => {
-      if (id === null || delta.id !== id) return;
-      if (delta.state?.current === "complete") finish({ kind: "download", id });
-      if (delta.state?.current === "interrupted") {
-        finish({ kind: "unavailable", error: delta.error?.current || "下载被中断" });
-      }
-    };
-    chrome.downloads.onChanged.addListener(onChanged);
-    chrome.downloads.download({ url, saveAs: false, conflictAction: "uniquify" }, (downloadId) => {
-      if (chrome.runtime.lastError || downloadId === undefined) {
-        finish({ kind: "unavailable", error: chrome.runtime.lastError?.message || "浏览器下载失败" });
-        return;
-      }
-      id = downloadId;
-    });
-  });
-}
-
-function searchDownloads(query) {
-  return new Promise((resolve, reject) => {
-    chrome.downloads.search(query, (items) => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else resolve(items || []);
-    });
-  });
-}
-
-async function downloadPdfAsBrowserNavigation(url) {
-  const result = await startBrowserDownload(url);
-  if (result.kind !== "download") return result;
-  try {
-    const item = (await searchDownloads({ id: result.id }))[0];
-    if (!item?.filename) return { kind: "unavailable", error: "找不到浏览器下载文件" };
-    return {
-      kind: "file",
-      path: item.filename,
-      fileName: item.filename.split(/[\\/]/).pop() || "paper.pdf"
-    };
   } catch (error) {
     return { kind: "unavailable", error: String(error?.message || error) };
   }
@@ -249,7 +172,7 @@ function s2Identifier(info) {
 
 async function semanticScholarRequest(path, params) {
   const query = new URLSearchParams(params || {}).toString();
-  const response = await fetch(`${S2_BASE}${path}${query ? `?${query}` : ""}`);
+  const response = await fetch(`${S2_BASE}${path}${query ? `?${query}` : ""}`, { signal: AbortSignal.timeout(8000) });
   if (!response.ok) return null;
   return responseJson(response);
 }
@@ -331,6 +254,7 @@ function normalizeServerResult(status, data) {
     title: data.title || ""
   };
   if (data?.needsLogin) return { ok: false, code: "needs-login", error: data.error || "请登录出版商网站后重试" };
+  if (data?.needsVerification) return { ok: false, code: "needs-verification", error: data.error };
   return { ok: false, code: status === 401 ? "bad-token" : "server", error: data?.error || `导入失败（HTTP ${status}）` };
 }
 
@@ -349,10 +273,12 @@ async function requireBridge() {
   }
 }
 
-async function importCurrentPaper(info, includePdf, tabId) {
+async function importCurrentPaper(info, includePdf, tabId, collection = "") {
+  if (info?.isPaper === false) return { ok: false, code: "no-paper", error: "当前页面未识别到论文，请打开论文详情页或 PDF" };
   const bridge = await requireBridge();
   if (bridge.error) return bridge.error;
   const metadata = metadataFrom(info);
+  metadata.collections = collection ? [String(collection)] : [];
   if (!includePdf) {
     const result = await postJson(bridge.settings, "/api/import", { metadata });
     return normalizeServerResult(result.status, result.data);
@@ -370,8 +296,13 @@ async function importCurrentPaper(info, includePdf, tabId) {
   }
 
   const fileName = safeFileName(info, pdfUrl);
+  const verificationRequired = () => ({
+    ok: false, code: "needs-verification", pdfUrl,
+    error: "出版商网站要求浏览器验证。请点击“打开 PDF 页面”，完成网站验证后回到论文页重试。"
+  });
   let sawLoginPage = false;
   const pageDownload = await fetchPdfFromPage(tabId, pdfUrl);
+  if (pageDownload?.kind === "needs-verification") return verificationRequired();
   if (pageDownload?.kind === "pdf") {
     const result = await postPdf(bridge.settings, metadata, fileName, pageDownload.buffer);
     return normalizeServerResult(result.status, result.data);
@@ -379,43 +310,16 @@ async function importCurrentPaper(info, includePdf, tabId) {
   sawLoginPage ||= pageDownload?.kind === "needs-login";
 
   const workerDownload = await fetchPdfFromWorker(pdfUrl);
+  if (workerDownload.kind === "needs-verification") return verificationRequired();
   if (workerDownload.kind === "pdf") {
     const result = await postPdf(bridge.settings, metadata, fileName, workerDownload.buffer);
     return normalizeServerResult(result.status, result.data);
   }
   sawLoginPage ||= workerDownload.kind === "needs-login";
 
-  if (isIeeePdfUrl(pdfUrl)) {
-    const warmed = await warmPdfNavigation(pdfUrl);
-    if (warmed) {
-      const warmedDownload = await fetchPdfFromWorker(pdfUrl);
-      if (warmedDownload.kind === "pdf") {
-        const result = await postPdf(bridge.settings, metadata, fileName, warmedDownload.buffer);
-        return normalizeServerResult(result.status, result.data);
-      }
-      sawLoginPage ||= warmedDownload.kind === "needs-login";
-    }
-  }
-
-  // A navigation-grade download is required by some publisher endpoints that
-  // reject fetch/XHR even when the user is authenticated.
-  const browserDownload = await downloadPdfAsBrowserNavigation(pdfUrl);
-  if (browserDownload.kind === "file") {
-    const result = await postJson(bridge.settings, "/api/import", {
-      metadata,
-      filePath: browserDownload.path,
-      fileName: browserDownload.fileName,
-      cleanup: true
-    });
-    const normalized = normalizeServerResult(result.status, result.data);
-    if (normalized.ok) return normalized;
-    sawLoginPage ||= normalized.code === "needs-login";
-  }
-
-  // A publisher may expose a PDF button that works only through its own page
-  // JavaScript or a library-access extension. Prefer that publisher copy, but
-  // if it remains blocked use the same paper's OA/arXiv PDF rather than telling
-  // an already-authenticated user that they lack permission.
+  // Fetch fallbacks stay in memory. Never call chrome.downloads or navigate
+  // automatically: an unverified publisher URL can save HTML onto disk.
+  // An OA copy can still be imported after validating its actual PDF bytes.
   const openAccessUrl = normalizePublisherPdfUrl(
     await discoverOpenAccessPdf(info).catch(() => ""),
     info
@@ -434,10 +338,12 @@ async function importCurrentPaper(info, includePdf, tabId) {
   const fallback = await postJson(bridge.settings, "/api/import", { metadata, pdfUrl, fileName });
   const normalizedFallback = normalizeServerResult(fallback.status, fallback.data);
   if (normalizedFallback.ok) return normalizedFallback;
+  if (normalizedFallback.code === "needs-verification") return verificationRequired();
   if (sawLoginPage || normalizedFallback.code === "needs-login") {
     return {
       ok: false,
       code: "needs-login",
+      pdfUrl,
       error: "该网站需要订阅或机构权限。请先在当前浏览器登录自己的账号，再打开论文 PDF 页面并重试。"
     };
   }
@@ -460,6 +366,10 @@ async function lookupCurrentPaper(info) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (message?.type === "paperlib:collections") {
+    listCollections().then(respond).catch((error) => respond({ ok: false, error: String(error?.message || error) }));
+    return true;
+  }
   if (message?.type === "paperlib:ping") {
     requireBridge().then((bridge) => respond(bridge.error || {
       ok: true,
@@ -468,7 +378,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "paperlib:import") {
-    importCurrentPaper(message.info || {}, message.includePdf !== false, message.tabId)
+    importCurrentPaper(message.info || {}, message.includePdf !== false, message.tabId, message.collection)
       .then(respond)
       .catch((error) => respond({ ok: false, code: "error", error: String(error?.message || error) }));
     return true;

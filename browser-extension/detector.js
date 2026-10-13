@@ -211,6 +211,10 @@
     );
     const pdfUrl = findPdfUrl(record, arxiv);
     return {
+      isPaper: Boolean(isPdfPage || arxiv || detectDoi(record) || meta("citation_title")
+        || /scholarlyarticle|techarticle|report|chapter/i.test([record?.["@type"]].flat().join(" "))
+        || (title && /(?:^|\.)(?:sciencedirect\.com|nature\.com|springer\.com|ieeexplore\.ieee\.org|acm\.org|wiley\.com|tandfonline\.com|optica\.org)$/.test(location.hostname)
+          && /\/(?:science\/article|articles|article|doi|document|chapter)\//i.test(location.pathname))),
       url: location.href,
       title,
       authors: citationAuthors.length ? citationAuthors : (dcAuthors.length ? dcAuthors : jsonLdAuthors(record)),
@@ -248,13 +252,17 @@
 
   async function fetchPdf(url) {
     try {
-      const response = await fetch(absoluteUrl(url) || url, { credentials: "include", redirect: "follow" });
+      const response = await fetch(absoluteUrl(url) || url, { credentials: "include", redirect: "follow", signal: AbortSignal.timeout(25000) });
+      const buffer = await response.arrayBuffer();
+      const header = String.fromCharCode(...new Uint8Array(buffer.slice(0, 5)));
+      if (header !== "%PDF-" && /captcha|are you a robot|verify you are human|checking your browser|challenge-platform|crasolve/i.test(
+        new TextDecoder().decode(buffer.slice(0, 256 * 1024)))) {
+        return { ok: false, reason: "needs-verification", status: response.status };
+      }
       if (response.status === 401 || response.status === 403) {
         return { ok: false, reason: "needs-login", status: response.status };
       }
       if (!response.ok) return { ok: false, reason: "http", status: response.status };
-      const buffer = await response.arrayBuffer();
-      const header = String.fromCharCode(...new Uint8Array(buffer.slice(0, 5)));
       if (header !== "%PDF-") {
         return { ok: false, reason: "needs-login", contentType: response.headers.get("content-type") || "" };
       }

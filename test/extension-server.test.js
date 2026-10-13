@@ -32,6 +32,7 @@ function makePlugin() {
   plugin.settings = {
     papers: [],
     tags: [],
+    collections: ["Reading", "Reading/加工", "Empty Collection"],
     extensionServerEnabled: true,
     extensionServerPort: PORT,
     extensionToken: "test-token-123"
@@ -81,6 +82,11 @@ async function api(path, { method = "GET", token = "test-token-123", body } = {}
     assert.strictEqual(res.status, 200);
     assert.strictEqual(res.data.ok, true);
     assert.strictEqual(res.data.papers, 0);
+    res = await api("/api/collections", { token: null });
+    assert.strictEqual(res.status, 401);
+    res = await api("/api/collections");
+    assert.ok(res.data.collections.includes("Empty Collection"), "空 Collection 也应可选");
+    assert.ok(res.data.collections.includes("Reading/加工"), "应保留中文子分类路径");
 
     // 3. 查询当前页面是否已在库中，并返回本地缓存的数据卡片
     res = await api("/api/lookup", {
@@ -109,7 +115,7 @@ async function api(path, { method = "GET", token = "test-token-123", body } = {}
     res = await api("/api/import", {
       method: "POST",
       body: {
-        metadata: { title: "Attention Is All You Need", doi: "10.1/test", authors: ["Vaswani"], year: 2017 },
+        metadata: { title: "Attention Is All You Need", doi: "10.1/test", authors: ["Vaswani"], year: 2017, collections: ["Reading/加工"] },
         pdfBase64: PDF_BYTES.toString("base64"),
         fileName: "attention.pdf"
       }
@@ -120,6 +126,7 @@ async function api(path, { method = "GET", token = "test-token-123", body } = {}
     assert.strictEqual(plugin.importPdfBatchCalls.length, 1, "应调用 importPdfBatch");
     assert.strictEqual(plugin.importPdfBatchCalls[0].files[0].name, "attention.pdf");
     assert.strictEqual(plugin.importPdfBatchCalls[0].hints[0].doi, "10.1/test");
+    assert.deepStrictEqual(plugin.importPdfBatchCalls[0].hints[0].collections, ["Reading/加工"]);
 
     // 5. 同 DOI 再导入 → 查重命中（先把论文放进库里）
     plugin.settings.papers.push({ id: "p1", title: "Attention Is All You Need", doi: "10.1/test", arxiv: "", pdfPath: "Papers/attention.pdf" });
@@ -142,13 +149,14 @@ async function api(path, { method = "GET", token = "test-token-123", body } = {}
     // 7. 纯元数据导入（拿不到全文时）
     res = await api("/api/import", {
       method: "POST",
-      body: { metadata: { title: "Metadata Only Paper", authors: ["Doe"], year: 2024, venue: "Nature" } }
+      body: { metadata: { title: "Metadata Only Paper", authors: ["Doe"], year: 2024, venue: "Nature", collections: ["Reading/加工"] } }
     });
     assert.strictEqual(res.status, 200, JSON.stringify(res.data));
     assert.strictEqual(res.data.metadataOnly, true);
     const added = plugin.settings.papers.find((p) => p.title === "Metadata Only Paper");
     assert.ok(added, "纯元数据论文应已入库");
     assert.deepStrictEqual(added.authors, ["Doe"]);
+    assert.deepStrictEqual(added.collections, ["Reading/加工"], "纯文献信息应保存所选分类");
     assert.strictEqual(added.importStatus, undefined, "纯元数据导入不应停留在导入中状态");
 
     // 8. 未知路径 → 404；OPTIONS 预检无需令牌
@@ -180,7 +188,50 @@ async function api(path, { method = "GET", token = "test-token-123", body } = {}
     assert.strictEqual(res.status, 400);
     assert.match(res.data.error, /目录/, "目录外路径应被拒绝");
 
-    console.log("Extension server tests passed (10/10)");
+    res = await api("/api/import", { method: "POST", body: { metadata: { title: "Stale collection", collections: ["Removed"] } } });
+    assert.strictEqual(res.status, 400);
+    assert.ok(!plugin.settings.papers.some((p) => p.title === "Stale collection"));
+
+    res = await api("/api/import", { method: "POST", body: {
+      metadata: { title: "Challenge page" }, pdfBase64: Buffer.from("<html><h1>Are you a robot?</h1>captcha</html>").toString("base64")
+    } });
+    assert.strictEqual(res.data.needsVerification, true);
+    assert.strictEqual(res.data.needsLogin, undefined, "网站验证不应误报订阅登录");
+
+    plugin.organizePaperFiles = async () => {};
+    plugin.refreshPaperPresentation = () => {};
+    res = await api("/api/import", { method: "POST", body: { metadata: { title: added.title, collections: ["Empty Collection"] } } });
+    assert.strictEqual(res.data.duplicate, true);
+    assert.deepStrictEqual(added.collections, ["Reading/加工", "Empty Collection"], "已有条目应追加所选分类并保留原分类");
+
+    // Exercise the real batch pipeline: success must be acknowledged after
+    // persistence, even while PDF metadata extraction is deliberately blocked.
+    const batchPlugin = makePlugin();
+    batchPlugin.importPdfBatch = PaperLibraryPlugin.prototype.importPdfBatch;
+    batchPlugin.flushBatchImportRefresh = batchPlugin.scheduleBatchImportRefresh = () => {};
+    batchPlugin.getAvailableOrganizedPaperPaths = (paper) => {
+      assert.deepStrictEqual(paper.collections, ["Reading/加工"]);
+      return { pdfPath: "Reading/加工/staged.pdf", notePath: "Reading/加工/staged.md" };
+    };
+    batchPlugin.saveDroppedPdf = async () => "Reading/加工/staged.pdf";
+    batchPlugin.app.vault.readBinary = async () => PDF_BYTES.buffer.slice(PDF_BYTES.byteOffset, PDF_BYTES.byteOffset + PDF_BYTES.length);
+    let releaseExtraction;
+    const extraction = new Promise((resolve) => { releaseExtraction = resolve; });
+    batchPlugin.extractLocalPdfMetadata = async () => { await extraction; return { title: "Staged PDF" }; };
+    batchPlugin.isDocLayoutRuntimeInstalled = () => false;
+    batchPlugin.enrichPaperVenueRanks = batchPlugin.organizePaperFiles = batchPlugin.ensurePaperNote = async () => {};
+    let persisted = false;
+    batchPlugin.saveSettings = async () => { if (batchPlugin.settings.papers.some((p) => p.pdfPath)) persisted = true; };
+    const staged = await batchPlugin.importExtensionPaper({ metadata: { title: "Staged PDF", collections: ["Reading/加工"] }, pdfBuffer: PDF_BYTES });
+    assert.strictEqual(staged.ok, true);
+    assert.ok(persisted, "返回成功前 PDF 和 Collection 必须已持久化");
+    assert.strictEqual(batchPlugin.settings.papers[0].pdfPath, "Reading/加工/staged.pdf");
+    const finishing = new Promise((resolve) => {
+      batchPlugin.saveSettings = async () => { if (!batchPlugin.settings.papers[0].importStatus) resolve(); };
+    });
+    releaseExtraction();
+    await finishing;
+    console.log("Extension server tests passed: authentication, collections, PDF import, duplicate updates, challenge detection and early acknowledgement");
   } finally {
     plugin.stopExtensionServer();
     assert.strictEqual(plugin.extensionServer, null, "服务应已停止");
